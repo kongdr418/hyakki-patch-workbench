@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>百鬼夜行采集标注</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260703-train-layout">
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <section class="panel">
+        <h1>百鬼采集</h1>
+        <label>数据集目录</label>
+        <input id="rootInput" type="text">
+        <button id="saveRootBtn">切换目录</button>
+      </section>
+
+      <section class="panel">
+        <h2>式神标签</h2>
+        <div class="row">
+          <select id="rarityInput">
+            <option value="sp">SP</option>
+            <option value="ssr">SSR</option>
+            <option value="sr">SR</option>
+            <option value="r">R</option>
+            <option value="n">N</option>
+            <option value="g">呱</option>
+          </select>
+          <input id="labelInput" type="text" placeholder="sp_036">
+        </div>
+        <input id="nameInput" type="text" placeholder="式神名称">
+        <button id="addClassBtn">添加标签</button>
+        <label>当前画框标签</label>
+        <select id="classSelect"></select>
+      </section>
+
+      <section class="panel">
+        <h2>采集</h2>
+        <div class="row">
+          <input id="configInput" type="text" value="oas1">
+          <select id="splitInput">
+            <option value="train">train</option>
+            <option value="val">val</option>
+          </select>
+        </div>
+        <button id="captureBtn">截图采集</button>
+        <div class="row">
+          <input id="recordSecondsInput" type="number" value="5" min="0.1" step="0.1">
+          <input id="recordIntervalInput" type="number" value="0.3" min="0.05" step="0.05">
+        </div>
+        <button id="recordBtn">连续采集</button>
+        <input id="videoPathInput" type="text" placeholder="D:\record.mp4">
+        <div class="row">
+          <input id="videoIntervalInput" type="number" value="0.2" min="0.01" step="0.01">
+          <input id="videoMaxInput" type="number" value="0" min="0" step="1">
+        </div>
+        <button id="videoBtn">录屏抽帧</button>
+      </section>
+
+      <section class="panel">
+        <h2>图片</h2>
+        <div class="row">
+          <button id="trainBtn">train</button>
+          <button id="valBtn">val</button>
+        </div>
+        <label>筛选</label>
+        <select id="frameLabelFilter">
+          <option value="">全部标签</option>
+        </select>
+        <input id="frameSearchInput" type="text" placeholder="搜索文件名 / 标签 / 式神名">
+        <label class="check">
+          <input id="onlyLabeledInput" type="checkbox">
+          只看有标注
+        </label>
+        <div class="row">
+          <button id="selectVisibleBtn">选择当前列表</button>
+          <button id="clearSelectionBtn">清空选择</button>
+        </div>
+        <div class="row">
+          <button id="moveTrainBtn">移到 train</button>
+          <button id="moveValBtn">移到 val</button>
+        </div>
+        <button id="deleteFramesBtn" class="danger-btn" disabled>删除所选图片</button>
+        <div id="frameSummary" class="frame-summary"></div>
+        <div id="frameList" class="frame-list"></div>
+      </section>
+
+    </aside>
+
+    <main class="main">
+      <header class="toolbar">
+        <div id="currentFrame">未选择图片</div>
+        <div class="actions">
+          <button id="prevBtn">上一张</button>
+          <button id="nextBtn">下一张</button>
+          <button id="deleteBoxBtn">删除框</button>
+          <button id="clearBoxesBtn">清空框</button>
+          <button id="saveAnnBtn">保存标注</button>
+          <button id="exportBtn">导出配置</button>
+        </div>
+      </header>
+      <section class="workspace">
+        <div class="center-column">
+          <div class="canvas-wrap">
+            <canvas id="canvas" width="1280" height="720"></canvas>
+          </div>
+          <section class="model-panel">
+            <div class="model-controls">
+              <h2>模型预识别</h2>
+              <select id="detectModelInput" title="识别模型">
+                <option value="legacy">OAS 原模型</option>
+                <option value="patch">训练模型（刚生成）</option>
+                <option value="both">原模型 + 训练模型</option>
+              </select>
+              <input id="legacyConfInput" type="number" value="0.25" min="0.01" max="1" step="0.01" title="置信度">
+              <input id="legacyIouInput" type="number" value="0.7" min="0.01" max="1" step="0.01" title="NMS IoU">
+              <button id="legacyCurrentBtn">预识别当前图</button>
+              <button id="legacyAllBtn">预识别当前分组</button>
+              <label class="check compact-check">
+                <input id="showLegacyInput" type="checkbox" checked>
+                显示参考框
+              </label>
+            </div>
+            <pre id="status" class="model-status"></pre>
+          </section>
+          <section class="panel train-panel">
+            <h2>训练</h2>
+            <div class="train-fields">
+              <label class="train-field train-python-field">
+                <span>训练 Python</span>
+                <div class="python-row">
+                  <input id="trainPythonInput" type="text" placeholder="toolkit\python.exe">
+                  <button id="useVenvPythonBtn" type="button">VENV</button>
+                  <button id="useOasPythonBtn" type="button">OAS</button>
+                </div>
+              </label>
+              <label class="train-field">
+                <span>基础模型</span>
+                <input id="trainModelInput" type="text" value="yolov8n.pt">
+              </label>
+              <label class="train-field">
+                <span>设备</span>
+                <select id="trainDeviceInput">
+                  <option value="cpu">CPU</option>
+                  <option id="gpuDeviceOption" value="0">GPU 0</option>
+                </select>
+              </label>
+              <label class="train-field train-number">
+                <span>轮数</span>
+                <input id="trainEpochsInput" type="number" value="120" min="1" step="1">
+              </label>
+              <label class="train-field train-number">
+                <span>Batch</span>
+                <input id="trainBatchInput" type="number" value="8" min="-1" step="1">
+              </label>
+              <label class="train-field train-number">
+                <span>尺寸</span>
+                <input id="trainImgszInput" type="number" value="640" min="64" step="32">
+              </label>
+              <label class="train-field train-number">
+                <span>Workers</span>
+                <input id="trainWorkersInput" type="number" value="0" min="0" step="1">
+              </label>
+            </div>
+            <div class="train-actions">
+              <label class="check compact-check">
+                <input id="trainForceInput" type="checkbox">
+                忽略数据量警告
+              </label>
+              <button id="installDepsBtn" type="button">安装训练依赖</button>
+              <button id="installCudaDepsBtn" type="button">安装显卡版 PyTorch</button>
+              <button id="trainCheckBtn" type="button">检查训练</button>
+              <button id="trainStartBtn" type="button">开始训练</button>
+              <button id="trainStopBtn" class="danger-btn" type="button">停止训练</button>
+            </div>
+            <div id="trainSummary" class="train-summary"></div>
+            <pre id="trainLog" class="train-log"></pre>
+          </section>
+        </div>
+        <aside class="box-panel">
+          <h2>标注框</h2>
+          <div id="boxList" class="box-list"></div>
+          <h2 class="subhead">模型识别参考框</h2>
+          <div id="legacyList" class="legacy-list"></div>
+        </aside>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js?v=20260703-train-layout"></script>
+</body>
+</html>

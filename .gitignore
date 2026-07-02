@@ -1,0 +1,24 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.venv-yolo/
+
+# Generated datasets and training output
+datasets/
+runs/
+*.pt
+models/*.onnx
+models/hya_patch_labels.json
+
+# Logs, caches, and temporary files
+*.log
+*.cache
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
