@@ -22,8 +22,63 @@ from pydantic import BaseModel, Field
 
 
 WORKBENCH_ROOT = Path(__file__).resolve().parent
+LOCAL_CONFIG_FILE = WORKBENCH_ROOT / "config.local.json"
 DEFAULT_OAS_ROOT = WORKBENCH_ROOT.parent / "OnmyojiAutoScript-easy-install"
-OAS_ROOT = Path(os.environ.get("HYAKKI_OAS_ROOT", DEFAULT_OAS_ROOT)).resolve()
+
+
+def load_workbench_config() -> dict:
+    if not LOCAL_CONFIG_FILE.exists():
+        return {}
+    try:
+        with LOCAL_CONFIG_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+WORKBENCH_CONFIG = load_workbench_config()
+
+
+def is_oas_root(path: Path) -> bool:
+    return (
+        (path / "toolkit" / "python.exe").exists()
+        and (path / "module" / "config" / "config.py").exists()
+        and (path / "tasks" / "Hyakkiyakou").exists()
+    )
+
+
+def discover_oas_root() -> Path:
+    explicit = [
+        os.environ.get("HYAKKI_OAS_ROOT"),
+        WORKBENCH_CONFIG.get("oas_root"),
+    ]
+    candidates = [Path(path).expanduser() for path in explicit if path]
+    candidates.append(DEFAULT_OAS_ROOT)
+    try:
+        for child in WORKBENCH_ROOT.parent.iterdir():
+            if child.is_dir():
+                candidates.append(child)
+    except OSError:
+        pass
+
+    seen = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if is_oas_root(resolved):
+            return resolved
+    return candidates[0].resolve() if candidates else DEFAULT_OAS_ROOT.resolve()
+
+
+OAS_ROOT = discover_oas_root()
+DEFAULT_OAS_CONFIG = str(
+    os.environ.get("HYAKKI_OAS_CONFIG")
+    or WORKBENCH_CONFIG.get("config_name")
+    or ""
+).strip()
 if str(OAS_ROOT) not in sys.path:
     sys.path.insert(0, str(OAS_ROOT))
 if OAS_ROOT.exists():
@@ -151,7 +206,7 @@ class ClassIn(BaseModel):
 
 
 class CaptureIn(BaseModel):
-    config_name: str = "oas1"
+    config_name: str = ""
     split: Literal["train", "val"] = "train"
     prefix: Literal["cap", "rec"] = "cap"
 
@@ -281,6 +336,41 @@ def class_item_for_label(label: str) -> dict | None:
         "name": LEGACY_MAP[rarity][label],
         "rarity": rarity,
     }
+
+
+def oas_config_names() -> list[str]:
+    config_dir = OAS_ROOT / "config"
+    if not config_dir.exists():
+        return []
+    excluded = {"template"}
+    names = []
+    for path in config_dir.glob("*.json"):
+        if path.stem.lower() in excluded:
+            continue
+        names.append(path.stem)
+    return sorted(names, key=str.lower)
+
+
+def default_oas_config_name() -> str:
+    if DEFAULT_OAS_CONFIG:
+        return DEFAULT_OAS_CONFIG
+    names = oas_config_names()
+    if "oas1" in names:
+        return "oas1"
+    return names[0] if names else ""
+
+
+def resolve_oas_config_name(config_name: str | None) -> str:
+    name = (config_name or "").strip()
+    if name:
+        return name
+    name = default_oas_config_name()
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No OAS config found in {OAS_ROOT / 'config'}",
+        )
+    return name
 
 
 def ensure_annotation_classes(classes: list[dict], labels: list[str]) -> tuple[list[dict], list[dict]]:
@@ -1055,6 +1145,16 @@ def state():
             "available": LegacyTracker is not None,
             "error": LEGACY_IMPORT_ERROR,
         },
+        "oas": {
+            "root": str(OAS_ROOT),
+            "exists": OAS_ROOT.exists(),
+            "config_dir": str(OAS_ROOT / "config"),
+            "configs": oas_config_names(),
+            "default_config": default_oas_config_name(),
+            "toolkit_python": str(OAS_TRAIN_PYTHON),
+            "toolkit_python_exists": OAS_TRAIN_PYTHON.exists(),
+            "local_config": str(LOCAL_CONFIG_FILE),
+        },
     }
 
 
@@ -1179,7 +1279,7 @@ def capture(payload: CaptureIn):
     from module.config.config import Config
     from module.device.device import Device
 
-    config = Config(payload.config_name)
+    config = Config(resolve_oas_config_name(payload.config_name))
     device = Device(config)
     image = device.screenshot()
     rel = save_rgb_image(image, payload.split, prefix=payload.prefix)
@@ -1191,7 +1291,7 @@ def record(payload: RecordIn):
     from module.config.config import Config
     from module.device.device import Device
 
-    config = Config(payload.config_name)
+    config = Config(resolve_oas_config_name(payload.config_name))
     device = Device(config)
     created = []
     end_time = time.time() + payload.seconds

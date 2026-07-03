@@ -16,7 +16,8 @@ const state = {
   selectedImages: new Set(),
   trainPythonOptions: {},
   patchModel: {exists: false, path: ''},
-  legacyModel: {available: true, error: ''}
+  legacyModel: {available: true, error: ''},
+  oas: {configs: [], default_config: '', root: '', config_dir: ''}
 };
 
 const $ = (id) => document.getElementById(id);
@@ -29,6 +30,32 @@ function sleep(ms) {
 
 function setStatus(text) {
   $('status').textContent = text || '';
+}
+
+function oasConfigName() {
+  const input = $('configInput');
+  const value = (input.value || '').trim();
+  if (value) return value;
+  const fallback = state.oas.default_config || state.oas.configs?.[0] || '';
+  if (!fallback) throw new Error('没有找到 OAS 配置，请先在 OAS 创建配置，或手动输入配置名。');
+  input.value = fallback;
+  return fallback;
+}
+
+function renderOasConfigs() {
+  const input = $('configInput');
+  const list = $('oasConfigList');
+  if (!input || !list) return;
+  const current = (input.value || '').trim();
+  list.innerHTML = '';
+  for (const name of state.oas.configs || []) {
+    const option = document.createElement('option');
+    option.value = name;
+    list.appendChild(option);
+  }
+  if (!current && state.oas.default_config) {
+    input.value = state.oas.default_config;
+  }
 }
 
 function detectSourceName(source = $('detectModelInput')?.value || 'legacy') {
@@ -97,7 +124,9 @@ async function loadState() {
   state.classes = data.classes;
   state.patchModel = data.patch_model || {exists: false, path: ''};
   state.legacyModel = data.legacy_model || {available: true, error: ''};
+  state.oas = data.oas || {configs: [], default_config: '', root: '', config_dir: ''};
   $('rootInput').value = state.root;
+  renderOasConfigs();
   renderClasses();
   updateDetectModelOptions();
   renderLegacyList();
@@ -818,9 +847,10 @@ $('addClassBtn').onclick = () => busy($('addClassBtn'), async () => {
 });
 
 $('captureBtn').onclick = () => busy($('captureBtn'), async () => {
+  const configName = oasConfigName();
   const data = await api('/api/capture', {
     method: 'POST',
-    body: JSON.stringify({config_name: $('configInput').value, split: $('splitInput').value})
+    body: JSON.stringify({config_name: configName, split: $('splitInput').value})
   });
   state.split = $('splitInput').value;
   await loadFrames(state.split, data.created[0]);
@@ -828,6 +858,7 @@ $('captureBtn').onclick = () => busy($('captureBtn'), async () => {
 });
 
 $('recordBtn').onclick = () => busy($('recordBtn'), async () => {
+  const configName = oasConfigName();
   const split = $('splitInput').value;
   const seconds = Math.max(0.1, Number($('recordSecondsInput').value) || 5);
   const interval = Math.max(0.05, Number($('recordIntervalInput').value) || 0.3);
@@ -842,7 +873,7 @@ $('recordBtn').onclick = () => busy($('recordBtn'), async () => {
     setStatus(`连续采集中：正在截第 ${i + 1}/${planned} 张，已保存 ${created.length} 张`);
     const data = await api('/api/capture', {
       method: 'POST',
-      body: JSON.stringify({config_name: $('configInput').value, split, prefix: 'rec'})
+      body: JSON.stringify({config_name: configName, split, prefix: 'rec'})
     });
     const image = data.created[0];
     created.push(image);

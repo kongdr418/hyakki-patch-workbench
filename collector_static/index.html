@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼夜行采集标注</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260703-train-layout">
+  <link rel="stylesheet" href="/static/style.css?v=20260703-portable-config">
 </head>
 <body>
   <div class="app">
@@ -38,7 +38,8 @@
       <section class="panel">
         <h2>采集</h2>
         <div class="row">
-          <input id="configInput" type="text" value="oas1">
+          <input id="configInput" type="text" list="oasConfigList" placeholder="OAS 配置名">
+          <datalist id="oasConfigList"></datalist>
           <select id="splitInput">
             <option value="train">train</option>
             <option value="val">val</option>
@@ -187,6 +188,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260703-train-layout"></script>
+  <script src="/static/app.js?v=20260703-portable-config"></script>
 </body>
 </html>
