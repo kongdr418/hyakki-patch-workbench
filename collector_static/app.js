@@ -23,6 +23,17 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
+const RARITY_ORDER = ['sp', 'ssr', 'sr', 'r', 'n', 'g', 'buff'];
+const RARITY_NAMES = {
+  sp: 'SP',
+  ssr: 'SSR',
+  sr: 'SR',
+  r: 'R',
+  n: 'N',
+  g: '呱',
+  buff: 'BUFF',
+  other: '其他'
+};
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -108,6 +119,48 @@ function updateDetectModelOptions() {
   }
 }
 
+function classRarity(item) {
+  const rarity = (item.rarity || String(item.label || '').split('_', 1)[0] || 'other').toLowerCase();
+  return RARITY_ORDER.includes(rarity) ? rarity : 'other';
+}
+
+function labelNumber(label) {
+  const match = String(label || '').match(/_(\d+)$/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function sortedClasses() {
+  return [...state.classes].sort((a, b) => {
+    const rarityA = classRarity(a);
+    const rarityB = classRarity(b);
+    const orderA = RARITY_ORDER.includes(rarityA) ? RARITY_ORDER.indexOf(rarityA) : RARITY_ORDER.length;
+    const orderB = RARITY_ORDER.includes(rarityB) ? RARITY_ORDER.indexOf(rarityB) : RARITY_ORDER.length;
+    if (orderA !== orderB) return orderA - orderB;
+    const numberA = labelNumber(a.label);
+    const numberB = labelNumber(b.label);
+    if (numberA !== numberB) return numberA - numberB;
+    return String(a.label).localeCompare(String(b.label), 'zh-Hans-CN');
+  });
+}
+
+function appendClassOptions(select, classes) {
+  let currentGroup = null;
+  let groupElement = null;
+  for (const item of classes) {
+    const group = classRarity(item);
+    if (group !== currentGroup) {
+      currentGroup = group;
+      groupElement = document.createElement('optgroup');
+      groupElement.label = RARITY_NAMES[group] || group.toUpperCase();
+      select.appendChild(groupElement);
+    }
+    const option = document.createElement('option');
+    option.value = item.label;
+    option.textContent = `${item.label} · ${item.name}`;
+    groupElement.appendChild(option);
+  }
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: {'Content-Type': 'application/json'},
@@ -140,20 +193,13 @@ function renderClasses() {
   select.innerHTML = '';
   const filter = $('frameLabelFilter');
   const oldFilter = filter ? filter.value : '';
+  const classes = sortedClasses();
   if (filter) {
     filter.innerHTML = '<option value="">全部标签</option>';
   }
-  for (const item of state.classes) {
-    const option = document.createElement('option');
-    option.value = item.label;
-    option.textContent = `${item.label} · ${item.name}`;
-    select.appendChild(option);
-    if (filter) {
-      const filterOption = document.createElement('option');
-      filterOption.value = item.label;
-      filterOption.textContent = `${item.label} · ${item.name}`;
-      filter.appendChild(filterOption);
-    }
+  appendClassOptions(select, classes);
+  if (filter) {
+    appendClassOptions(filter, classes);
   }
   if (filter && Array.from(filter.options).some(option => option.value === oldFilter)) {
     filter.value = oldFilter;
@@ -198,7 +244,9 @@ function frameMatchesFilter(frame) {
   const labelFilter = $('frameLabelFilter')?.value || '';
   const query = ($('frameSearchInput')?.value || '').trim().toLowerCase();
   const onlyLabeled = $('onlyLabeledInput')?.checked || false;
+  const onlyUnlabeled = $('onlyUnlabeledInput')?.checked || false;
   if (onlyLabeled && frame.boxes.length === 0) return false;
+  if (onlyUnlabeled && frame.boxes.length > 0) return false;
   if (labelFilter && !frame.boxes.some(box => box.label === labelFilter)) return false;
   if (!query) return true;
 
@@ -927,9 +975,26 @@ $('installCudaDepsBtn').onclick = () => busy($('installCudaDepsBtn'), () => inst
 $('trainDeviceInput').onchange = () => updateTrainStatus().catch(error => setStatus(error.message));
 $('trainStartBtn').onclick = () => busy($('trainStartBtn'), startTraining);
 $('trainStopBtn').onclick = () => busy($('trainStopBtn'), stopTraining);
-$('frameLabelFilter').onchange = renderFrameList;
+$('frameLabelFilter').onchange = () => {
+  if ($('frameLabelFilter').value) {
+    $('onlyUnlabeledInput').checked = false;
+  }
+  renderFrameList();
+};
 $('frameSearchInput').oninput = renderFrameList;
-$('onlyLabeledInput').onchange = renderFrameList;
+$('onlyLabeledInput').onchange = () => {
+  if ($('onlyLabeledInput').checked) {
+    $('onlyUnlabeledInput').checked = false;
+  }
+  renderFrameList();
+};
+$('onlyUnlabeledInput').onchange = () => {
+  if ($('onlyUnlabeledInput').checked) {
+    $('onlyLabeledInput').checked = false;
+    $('frameLabelFilter').value = '';
+  }
+  renderFrameList();
+};
 $('selectVisibleBtn').onclick = selectVisibleFrames;
 $('clearSelectionBtn').onclick = clearFrameSelection;
 $('moveTrainBtn').onclick = () => busy($('moveTrainBtn'), () => moveSelectedFrames('train'));

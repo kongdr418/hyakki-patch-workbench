@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼夜行采集标注</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260703-portable-config">
+  <link rel="stylesheet" href="/static/style.css?v=20260703-train-wrap">
 </head>
 <body>
   <div class="app">
@@ -70,10 +70,16 @@
           <option value="">全部标签</option>
         </select>
         <input id="frameSearchInput" type="text" placeholder="搜索文件名 / 标签 / 式神名">
-        <label class="check">
-          <input id="onlyLabeledInput" type="checkbox">
-          只看有标注
-        </label>
+        <div class="filter-checks">
+          <label class="check">
+            <input id="onlyLabeledInput" type="checkbox">
+            只看有标注
+          </label>
+          <label class="check">
+            <input id="onlyUnlabeledInput" type="checkbox">
+            只看没标注
+          </label>
+        </div>
         <div class="row">
           <button id="selectVisibleBtn">选择当前列表</button>
           <button id="clearSelectionBtn">清空选择</button>
@@ -188,6 +194,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260703-portable-config"></script>
+  <script src="/static/app.js?v=20260703-train-wrap"></script>
 </body>
 </html>

@@ -73,6 +73,17 @@ label {
   height: auto;
 }
 
+.filter-checks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.filter-checks .check {
+  margin-top: 0;
+}
+
 input, select, button {
   width: 100%;
   height: 34px;
@@ -337,7 +348,7 @@ canvas {
 
 .train-fields {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) minmax(130px, 1fr) minmax(120px, .9fr) repeat(4, minmax(86px, .65fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   align-items: end;
 }
@@ -365,12 +376,13 @@ canvas {
 }
 
 .train-python-field {
+  grid-column: span 2;
   min-width: 0;
 }
 
 .train-actions {
   display: grid;
-  grid-template-columns: minmax(150px, .9fr) repeat(2, minmax(160px, 1fr)) repeat(2, minmax(110px, .8fr)) minmax(130px, .9fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   align-items: center;
   margin-top: 10px;
@@ -383,12 +395,25 @@ canvas {
 }
 
 .train-actions .check {
+  grid-column: 1 / -1;
   margin: 0;
   justify-content: flex-start;
 }
 
 .train-actions #trainStopBtn {
-  min-width: 130px;
+  min-width: 0;
+}
+
+@media (max-width: 1280px) {
+  .train-fields,
+  .train-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .train-python-field,
+  .train-actions .check {
+    grid-column: 1 / -1;
+  }
 }
 
 .box-panel {
