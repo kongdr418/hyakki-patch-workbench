@@ -249,7 +249,7 @@ function frameMatchesFilter(frame) {
   const onlyUntrained = $('onlyUntrainedInput')?.checked || false;
   if (onlyLabeled && frame.boxes.length === 0) return false;
   if (onlyUnlabeled && frame.boxes.length > 0) return false;
-  if (onlyUntrained && (frame.trained || frame.boxes.length === 0)) return false;
+  if (onlyUntrained && frame.trained) return false;
   if (labelFilter && !frame.boxes.some(box => box.label === labelFilter)) return false;
   if (!query) return true;
 
@@ -290,7 +290,7 @@ function renderFrameList() {
     const title = document.createElement('button');
     title.type = 'button';
     title.className = 'frame-open';
-    const trainMark = frame.boxes.length ? (frame.trained ? ' · 已训' : ' · 未训') : '';
+    const trainMark = frame.trained ? ' · 已训' : (frame.boxes.length ? ' · 未训' : ' · 未标注');
     title.textContent = `${visibleIndex + 1}. ${frame.name} (${frame.boxes.length})${trainMark}`;
     title.onclick = () => openFrame(index);
 
@@ -303,7 +303,7 @@ function renderFrameList() {
 
 function renderFrameSummary(visibleCount = filteredFrameEntries().length) {
   const selectedCount = state.selectedImages.size;
-  const untrained = state.frames.filter(frame => frame.boxes.length > 0 && !frame.trained).length;
+  const untrained = state.frames.filter(frame => !frame.trained).length;
   $('frameSummary').textContent = `${state.split}: ${visibleCount}/${state.frames.length} 张，未训练 ${untrained} 张，已选 ${selectedCount} 张`;
   $('moveTrainBtn').disabled = selectedCount === 0 || state.split === 'train';
   $('moveValBtn').disabled = selectedCount === 0 || state.split === 'val';
@@ -925,7 +925,7 @@ function renderTrainStatus(data) {
       <div><b>${dataset.train.boxes}</b><span>train 框</span></div>
       <div><b>${dataset.val.boxes}</b><span>val 框</span></div>
       <div><b>${dataset.classes.length}</b><span>类别</span></div>
-      <div><b>${dataset.train.untrained_labeled_images}</b><span>未训练图</span></div>
+      <div><b>${dataset.train.untrained_images}</b><span>未训练图</span></div>
     </div>
     <div class="train-line">环境：${envText} · ${moduleText(env.modules)}</div>
     <div class="train-line">${escapeHtml(gpuText(env))}</div>

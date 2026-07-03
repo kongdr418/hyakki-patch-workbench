@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -118,6 +119,7 @@ PIP_DOWNLOAD_TIMEOUT = "300"
 PIP_RETRIES = "10"
 ENV_CHECK_TIMEOUT = 120
 ENV_CHECK_CACHE_SECONDS = 300
+SAMPLE_DIGEST_VERSION = 2
 
 RARITIES = ("buff", "sp", "ssr", "sr", "r", "n", "g")
 LEGACY_MAP = {
@@ -656,6 +658,7 @@ def timestamp_id() -> str:
 def empty_training_manifest() -> dict:
     return {
         "version": 1,
+        "digest_version": SAMPLE_DIGEST_VERSION,
         "runs": [],
         "samples": {},
     }
@@ -675,6 +678,9 @@ def load_training_manifest() -> dict:
     data.setdefault("version", 1)
     data.setdefault("runs", [])
     data.setdefault("samples", {})
+    if migrate_training_manifest_digests(data):
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     return data
 
 
@@ -686,11 +692,41 @@ def save_training_manifest(manifest: dict):
 
 def sample_digest_for_files(image_file: Path, label_file: Path) -> str:
     digest = hashlib.sha256()
+    image_stat = image_file.stat()
+    digest.update(f"{image_stat.st_size}:{image_stat.st_mtime_ns}".encode("ascii"))
+    digest.update(b"\0labels\0")
+    if label_file.exists():
+        digest.update(label_file.read_bytes())
+    return digest.hexdigest()
+
+
+def legacy_sample_digest_for_files(image_file: Path, label_file: Path) -> str:
+    digest = hashlib.sha256()
     digest.update(image_file.read_bytes())
     digest.update(b"\0labels\0")
     if label_file.exists():
         digest.update(label_file.read_bytes())
     return digest.hexdigest()
+
+
+def migrate_training_manifest_digests(manifest: dict) -> bool:
+    if int(manifest.get("digest_version") or 1) >= SAMPLE_DIGEST_VERSION:
+        return False
+
+    for image_rel, record in manifest.get("samples", {}).items():
+        parts = Path(image_rel).parts
+        if len(parts) != 2 or parts[0] not in ("train", "val") or not isinstance(record, dict):
+            continue
+        image_file = store.root / "images" / parts[0] / parts[1]
+        label_file = store.root / "labels" / parts[0] / f"{image_file.stem}.txt"
+        if not image_file.exists() or not label_file.exists():
+            continue
+        old_digest = record.get("digest")
+        if old_digest and legacy_sample_digest_for_files(image_file, label_file) == old_digest:
+            record["digest"] = sample_digest_for_files(image_file, label_file)
+
+    manifest["digest_version"] = SAMPLE_DIGEST_VERSION
+    return True
 
 
 def sample_training_state(
@@ -779,9 +815,7 @@ def prepare_training_dataset(mode: str, run_id: str) -> dict:
         if mode == "incremental":
             detail = "没有新的已标注 train 图片；所有当前 train 标注都已经进入过模型训练"
         raise HTTPException(status_code=400, detail=detail)
-    data_yaml_path = store.root / "data.yaml"
-    if mode == "incremental":
-        data_yaml_path = write_training_subset_yaml(run_id, selected_train, val_items, classes)
+    data_yaml_path = write_training_subset_yaml(run_id, selected_train, val_items, classes)
     return {
         "data_yaml": data_yaml_path,
         "classes": classes,
@@ -917,6 +951,7 @@ def split_stats(split: str) -> dict:
         "labeled_images": labeled_images,
         "boxes": boxes,
         "trained_labeled_images": labeled_images - len(untrained_items),
+        "untrained_images": len(images) - (labeled_images - len(untrained_items)),
         "untrained_labeled_images": len(untrained_items),
         "untrained_boxes": sum(item["boxes"] for item in untrained_items),
     }
@@ -1298,15 +1333,30 @@ def save_bgr_image(image, split: str, prefix: str = "frame") -> str:
     return f"{split}/{name}"
 
 
-def read_annotations(image_rel: str, classes: list[dict]) -> list[dict]:
-    path, _split = image_path(image_rel)
+def image_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as f:
+            header = f.read(24)
+        if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
+            width, height = struct.unpack(">II", header[16:24])
+            return width, height
+    except OSError:
+        return None
+
     image = cv2.imread(str(path))
     if image is None:
-        return []
+        return None
     height, width = image.shape[:2]
-    label_path = label_path_for_image(image_rel)
+    return width, height
+
+
+def read_annotations_from_files(path: Path, label_path: Path, classes: list[dict]) -> list[dict]:
     if not label_path.exists():
         return []
+    dimensions = image_dimensions(path)
+    if dimensions is None:
+        return []
+    width, height = dimensions
     result = []
     for line in label_path.read_text(encoding="utf-8").splitlines():
         fields = line.split()
@@ -1326,6 +1376,12 @@ def read_annotations(image_rel: str, classes: list[dict]) -> list[dict]:
     return result
 
 
+def read_annotations(image_rel: str, classes: list[dict]) -> list[dict]:
+    path, split = image_path(image_rel)
+    label_path = store.root / "labels" / split / f"{path.stem}.txt"
+    return read_annotations_from_files(path, label_path, classes)
+
+
 def frame_item(path: Path, split: str, classes: list[dict], manifest: dict | None = None) -> dict:
     rel = f"{split}/{path.name}"
     label_file = store.root / "labels" / split / f"{path.stem}.txt"
@@ -1335,7 +1391,7 @@ def frame_item(path: Path, split: str, classes: list[dict], manifest: dict | Non
         "name": path.name,
         "split": split,
         "mtime": path.stat().st_mtime,
-        "boxes": read_annotations(rel, classes),
+        "boxes": read_annotations_from_files(path, label_file, classes),
         "trained": train_state["trained"],
         "trained_at": train_state["trained_at"],
         "last_train_run": train_state["last_run"],
@@ -1434,25 +1490,37 @@ def frames(split: Literal["train", "val"] = "train"):
 @app.post("/api/frames/move")
 def move_frames(payload: MoveFramesIn):
     moved = []
+    manifest = load_training_manifest()
+    manifest_changed = False
     for image_rel in payload.images:
         item = move_frame_item(image_rel, payload.target)
         if item is not None:
             moved.append(item)
+            record = manifest.get("samples", {}).pop(item["from"], None)
+            if record is not None:
+                manifest.setdefault("samples", {})[item["to"]] = record
+                manifest_changed = True
+    if manifest_changed:
+        save_training_manifest(manifest)
     return {
         "target": payload.target,
         "moved": moved,
-        "state": state(),
     }
 
 
 @app.post("/api/frames/delete")
 def delete_frames(payload: DeleteFramesIn):
     deleted = []
+    manifest = load_training_manifest()
+    manifest_changed = False
     for image_rel in payload.images:
         deleted.append(delete_frame_item(image_rel))
+        if manifest.get("samples", {}).pop(image_rel, None) is not None:
+            manifest_changed = True
+    if manifest_changed:
+        save_training_manifest(manifest)
     return {
         "deleted": deleted,
-        "state": state(),
     }
 
 
