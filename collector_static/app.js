@@ -477,6 +477,17 @@ function sameAnnotationBox(left, right) {
     && Math.abs(left.h - right.h) < 2;
 }
 
+function boxesFromDetections(detections) {
+  const boxes = [];
+  for (const box of detections || []) {
+    const adopted = {label: box.label, x: box.x, y: box.y, w: box.w, h: box.h};
+    if (!boxes.some(existing => sameAnnotationBox(existing, adopted))) {
+      boxes.push(adopted);
+    }
+  }
+  return boxes;
+}
+
 function adoptAllRecognitionLabels() {
   if (!state.legacy.length) {
     setStatus('当前图还没有模型识别框');
@@ -484,8 +495,7 @@ function adoptAllRecognitionLabels() {
   }
   let added = 0;
   let skipped = 0;
-  for (const box of state.legacy) {
-    const adopted = {label: box.label, x: box.x, y: box.y, w: box.w, h: box.h};
+  for (const adopted of boxesFromDetections(state.legacy)) {
     if (state.boxes.some(existing => sameAnnotationBox(existing, adopted))) {
       skipped += 1;
       continue;
@@ -559,16 +569,7 @@ function renderLegacyList() {
 async function saveAnnotations() {
   if (state.index < 0) return;
   const frame = state.frames[state.index];
-  const data = await api('/api/annotations', {
-    method: 'POST',
-    body: JSON.stringify({image: frame.image, boxes: state.boxes})
-  });
-  if (data.classes) {
-    state.classes = data.classes;
-    renderClasses();
-  }
-  state.frames[state.index].boxes = data.boxes;
-  state.boxes = data.boxes.map(box => ({...box}));
+  const data = await saveImageAnnotations(frame.image, state.boxes);
   const addedText = data.added_classes && data.added_classes.length
     ? `，自动加入 ${data.added_classes.length} 个 OAS 标签`
     : '';
@@ -576,6 +577,23 @@ async function saveAnnotations() {
   renderFrameList();
   renderBoxList();
   draw();
+}
+
+async function saveImageAnnotations(image, boxes) {
+  const data = await api('/api/annotations', {
+    method: 'POST',
+    body: JSON.stringify({image, boxes})
+  });
+  if (data.classes) {
+    state.classes = data.classes;
+    renderClasses();
+  }
+  const frame = state.frames.find(item => item.image === image);
+  if (frame) frame.boxes = data.boxes;
+  if (state.frames[state.index]?.image === image) {
+    state.boxes = data.boxes.map(box => ({...box}));
+  }
+  return data;
 }
 
 function legacySettings() {
@@ -627,6 +645,67 @@ async function predictBatchLegacy(images = null) {
   }
   setStatus(`${detectSourceName(data.source)}预识别 ${data.images} 张，${data.detections} 个参考框${warningSuffix(data.warnings)}`);
   return data;
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function autoAnnotateUnlabeledAndExport() {
+  const targets = state.frames
+    .filter(frame => frame.boxes.length === 0)
+    .map(frame => frame.image);
+  if (!targets.length) {
+    setStatus(`${state.split} 当前没有未标注图片`);
+    return;
+  }
+
+  const sourceName = detectSourceName();
+  const chunks = chunkItems(targets, 20);
+  const predictions = {};
+  let detectedBoxes = 0;
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    setStatus(`${sourceName}识别未标注图：第 ${i + 1}/${chunks.length} 批，已识别 ${Object.keys(predictions).length}/${targets.length} 张`);
+    const data = await api('/api/legacy-detect-batch', {
+      method: 'POST',
+      body: JSON.stringify({split: state.split, images: chunks[i], ...legacySettings()})
+    });
+    for (const [image, detections] of Object.entries(data.predictions || {})) {
+      predictions[image] = detections || [];
+      setLegacyForImage(image, detections || []);
+      detectedBoxes += (detections || []).length;
+    }
+    if (data.warnings && data.warnings.length) {
+      setStatus(`${sourceName}识别未标注图：第 ${i + 1}/${chunks.length} 批完成${warningSuffix(data.warnings)}`);
+    }
+  }
+
+  let savedImages = 0;
+  let savedBoxes = 0;
+  let skippedImages = 0;
+  for (const image of targets) {
+    const boxes = boxesFromDetections(predictions[image] || []);
+    if (!boxes.length) {
+      skippedImages += 1;
+      continue;
+    }
+    setStatus(`保存自动标注：${savedImages + skippedImages + 1}/${targets.length} 张，已保存 ${savedImages} 张`);
+    const data = await saveImageAnnotations(image, boxes);
+    savedImages += 1;
+    savedBoxes += data.boxes.length;
+  }
+
+  renderFrameList();
+  renderBoxList();
+  draw();
+  const exported = await api('/api/export', {method: 'POST', body: '{}'});
+  await updateTrainStatus();
+  setStatus(`自动标注完成：识别 ${targets.length} 张，参考框 ${detectedBoxes} 个，保存 ${savedImages} 张/${savedBoxes} 框，跳过 ${skippedImages} 张空识别。已导出配置。\n${exported.data_yaml}\n${exported.patch_labels}`);
 }
 
 function trainSettings() {
@@ -688,6 +767,81 @@ function escapeHtml(text) {
   }[char]));
 }
 
+function stripAnsi(text) {
+  return String(text || '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+}
+
+function parseTrainProgress(logText) {
+  const clean = stripAnsi(logText).replace(/\r/g, '\n');
+  const lines = clean.split('\n').map(line => line.trim()).filter(Boolean);
+  let epoch = null;
+  let totalEpochs = null;
+  let batch = null;
+  let totalBatches = null;
+  let epochLine = '';
+  let metricLine = '';
+
+  for (const line of lines) {
+    const epochMatch = line.match(/^\s*(\d+)\s*\/\s*(\d+)\s+\S*G\b/);
+    const batchMatch = line.match(/:\s*\d+%\s+.*?\s(\d+)\s*\/\s*(\d+)\s/);
+    if (epochMatch) {
+      epoch = Number(epochMatch[1]);
+      totalEpochs = Number(epochMatch[2]);
+      epochLine = line;
+      if (batchMatch) {
+        batch = Number(batchMatch[1]);
+        totalBatches = Number(batchMatch[2]);
+      }
+    }
+    if (/^all\s+\d+\s+\d+/.test(line)) {
+      metricLine = line;
+    }
+  }
+
+  let metrics = null;
+  if (metricLine) {
+    const parts = metricLine.split(/\s+/);
+    if (parts.length >= 7) {
+      metrics = {
+        precision: Number(parts[3]),
+        recall: Number(parts[4]),
+        map50: Number(parts[5]),
+        map5095: Number(parts[6])
+      };
+    }
+  }
+
+  const percent = epoch && totalEpochs ? Math.min(100, Math.round((epoch / totalEpochs) * 100)) : 0;
+  return {epoch, totalEpochs, batch, totalBatches, percent, epochLine, metricLine, metrics};
+}
+
+function trainProgressHtml(data) {
+  const progress = parseTrainProgress(data.log || '');
+  const job = data.job || {};
+  const hasProgress = progress.epoch && progress.totalEpochs;
+  const title = hasProgress
+    ? `${progress.epoch} / ${progress.totalEpochs} 轮`
+    : (job.running ? '训练中' : (job.exit_code === 0 ? '训练完成' : '暂无训练进度'));
+  const batchText = progress.batch && progress.totalBatches
+    ? `当前轮 ${progress.batch}/${progress.totalBatches} batch`
+    : (progress.epochLine ? escapeHtml(progress.epochLine) : '');
+  const metricText = progress.metrics
+    ? `P ${progress.metrics.precision.toFixed(3)} · R ${progress.metrics.recall.toFixed(3)} · mAP50 ${progress.metrics.map50.toFixed(3)} · mAP50-95 ${progress.metrics.map5095.toFixed(3)}`
+    : (progress.metricLine ? escapeHtml(progress.metricLine) : '');
+
+  return `
+    <div class="train-progress-card">
+      <div class="train-progress-head">
+        <b>${title}</b>
+        <span>${job.running ? '运行中' : (job.exit_code === 0 ? '已完成' : '未运行')}</span>
+      </div>
+      <div class="train-progress-bar"><span style="width: ${progress.percent}%"></span></div>
+      <div class="train-progress-meta">${batchText || '等待训练日志'}</div>
+      ${metricText ? `<div class="train-progress-meta">${metricText}</div>` : ''}
+    </div>
+  `;
+}
+
 function renderTrainStatus(data) {
   const dataset = data.dataset;
   const env = data.environment;
@@ -724,13 +878,14 @@ function renderTrainStatus(data) {
     '',
     data.commands.train
   ].join('\n');
-  const logText = data.install_log || data.log || '';
+  const logText = data.log || data.install_log || '';
   const selectedGpuWithoutCuda = $('trainDeviceInput').value !== 'cpu' && !(env.gpu || {}).usable;
   const gpuWarning = (env.gpu && env.gpu.reason && !(env.gpu || {}).usable)
     ? `<div class="warn-text">${escapeHtml(env.gpu.reason)}</div>`
     : '';
 
   $('trainSummary').innerHTML = `
+    ${trainProgressHtml(data)}
     <div class="train-kpis">
       <div><b>${dataset.train.boxes}</b><span>train 框</span></div>
       <div><b>${dataset.val.boxes}</b><span>val 框</span></div>
@@ -950,6 +1105,7 @@ $('videoBtn').onclick = () => busy($('videoBtn'), async () => {
 
 $('legacyCurrentBtn').onclick = () => busy($('legacyCurrentBtn'), predictCurrentLegacy);
 $('legacyAllBtn').onclick = () => busy($('legacyAllBtn'), () => predictBatchLegacy());
+$('autoAnnotateBtn').onclick = () => busy($('autoAnnotateBtn'), autoAnnotateUnlabeledAndExport);
 $('detectModelInput').onchange = () => {
   setStatus(`已切换为 ${detectSourceName()} 预识别`);
 };

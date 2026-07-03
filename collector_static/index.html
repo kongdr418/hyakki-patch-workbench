@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼夜行采集标注</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260703-train-wrap">
+  <link rel="stylesheet" href="/static/style.css?v=20260703-auto-annotate">
 </head>
 <body>
   <div class="app">
@@ -124,6 +124,7 @@
               <input id="legacyIouInput" type="number" value="0.7" min="0.01" max="1" step="0.01" title="NMS IoU">
               <button id="legacyCurrentBtn">预识别当前图</button>
               <button id="legacyAllBtn">预识别当前分组</button>
+              <button id="autoAnnotateBtn">识别未标注并导出</button>
               <label class="check compact-check">
                 <input id="showLegacyInput" type="checkbox" checked>
                 显示参考框
@@ -194,6 +195,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260703-train-wrap"></script>
+  <script src="/static/app.js?v=20260703-auto-annotate"></script>
 </body>
 </html>

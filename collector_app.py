@@ -1274,29 +1274,49 @@ def add_class(payload: ClassIn):
     return {"classes": classes, "added": item}
 
 
-@app.post("/api/capture")
-def capture(payload: CaptureIn):
+def make_oas_device(config_name: str):
     from module.config.config import Config
     from module.device.device import Device
 
-    config = Config(resolve_oas_config_name(payload.config_name))
-    device = Device(config)
-    image = device.screenshot()
+    config = Config(resolve_oas_config_name(config_name))
+    return Device(config)
+
+
+def oas_screenshot_with_retry(config_name: str, device=None, attempts: int = 2):
+    last_error = None
+    active_device = device
+    for attempt in range(attempts):
+        try:
+            if active_device is None or attempt > 0:
+                active_device = make_oas_device(config_name)
+            return active_device.screenshot(), active_device
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_error = exc
+            active_device = None
+            if attempt < attempts - 1:
+                time.sleep(1)
+    raise HTTPException(
+        status_code=502,
+        detail=f"OAS截图失败，已重试{attempts}次：{type(last_error).__name__}: {last_error}",
+    )
+
+
+@app.post("/api/capture")
+def capture(payload: CaptureIn):
+    image, _device = oas_screenshot_with_retry(payload.config_name)
     rel = save_rgb_image(image, payload.split, prefix=payload.prefix)
     return {"created": [rel]}
 
 
 @app.post("/api/record")
 def record(payload: RecordIn):
-    from module.config.config import Config
-    from module.device.device import Device
-
-    config = Config(resolve_oas_config_name(payload.config_name))
-    device = Device(config)
+    device = None
     created = []
     end_time = time.time() + payload.seconds
     while time.time() < end_time:
-        image = device.screenshot()
+        image, device = oas_screenshot_with_retry(payload.config_name, device=device)
         created.append(save_rgb_image(image, payload.split, prefix="rec"))
         time.sleep(payload.interval)
     return {"created": created}

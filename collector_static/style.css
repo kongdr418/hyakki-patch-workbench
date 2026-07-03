@@ -323,6 +323,10 @@ canvas {
   white-space: nowrap;
 }
 
+.model-controls #autoAnnotateBtn {
+  flex-basis: 180px;
+}
+
 .compact-check {
   margin: 0;
   white-space: nowrap;
@@ -402,6 +406,43 @@ canvas {
 
 .train-actions #trainStopBtn {
   min-width: 0;
+}
+
+.train-progress-card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  margin-top: 10px;
+  background: #f8fafc;
+}
+
+.train-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.train-progress-head span,
+.train-progress-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.train-progress-bar {
+  height: 8px;
+  margin: 7px 0;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.train-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
 }
 
 @media (max-width: 1280px) {
