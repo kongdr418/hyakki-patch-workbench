@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼夜行采集标注</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260703-auto-annotate">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css?v=20260703-train-perf">
 </head>
 <body>
   <div class="app">
@@ -160,7 +161,7 @@
               </label>
               <label class="train-field train-number">
                 <span>Batch</span>
-                <input id="trainBatchInput" type="number" value="8" min="-1" step="1">
+                <input id="trainBatchInput" type="number" value="16" min="-1" step="1">
               </label>
               <label class="train-field train-number">
                 <span>尺寸</span>
@@ -168,7 +169,7 @@
               </label>
               <label class="train-field train-number">
                 <span>Workers</span>
-                <input id="trainWorkersInput" type="number" value="0" min="0" step="1">
+                <input id="trainWorkersInput" type="number" value="4" min="0" step="1">
               </label>
             </div>
             <div class="train-actions">
@@ -195,6 +196,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260703-auto-annotate"></script>
+  <script src="/static/app.js?v=20260703-train-perf"></script>
 </body>
 </html>

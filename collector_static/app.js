@@ -714,9 +714,9 @@ function trainSettings() {
     model: $('trainModelInput').value || 'yolov8n.pt',
     epochs: Number($('trainEpochsInput').value || 120),
     imgsz: Number($('trainImgszInput').value || 640),
-    batch: Number($('trainBatchInput').value || 8),
+    batch: Number($('trainBatchInput').value || 16),
     device: $('trainDeviceInput').value || 'cpu',
-    workers: Number($('trainWorkersInput').value || 0),
+    workers: Number($('trainWorkersInput').value || 4),
     force: $('trainForceInput').checked
   };
 }

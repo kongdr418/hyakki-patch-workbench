@@ -228,9 +228,10 @@ class TrainStartIn(BaseModel):
     model: str = "yolov8n.pt"
     epochs: int = Field(default=120, ge=1, le=1000)
     imgsz: int = Field(default=640, ge=64, le=2048)
-    batch: int = Field(default=8, ge=-1, le=256)
+    batch: int = Field(default=16, ge=-1, le=256)
     device: str = "cpu"
-    workers: int = Field(default=0, ge=0, le=16)
+    workers: int = Field(default=4, ge=0, le=16)
+    cache: str = Field(default="ram")
     name: str = "hya_patch"
     force: bool = False
 
@@ -939,8 +940,10 @@ def training_commands(python_path: str, device: str = "cpu") -> dict:
         "--model", "yolov8n.pt",
         "--epochs", "120",
         "--imgsz", "640",
-        "--batch", "8",
+        "--batch", "16",
         "--device", device,
+        "--workers", "4",
+        "--cache", "ram",
     ]
     return {
         "prepare": prepare,
@@ -1531,6 +1534,7 @@ def train_start(payload: TrainStartIn):
         "--batch", str(payload.batch),
         "--device", payload.device,
         "--workers", str(payload.workers),
+        "--cache", payload.cache,
         "--project", str(TRAIN_RUNS_DIR),
         "--name", payload.name,
         "--output", str(PATCH_MODEL_FILE),

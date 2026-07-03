@@ -13,9 +13,10 @@ def parse_args():
     parser.add_argument("--model", default="yolov8n.pt", help="Base YOLO model")
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--cache", default="ram", help="Ultralytics image cache mode: ram / disk / true / false")
     parser.add_argument("--project", required=True)
     parser.add_argument("--name", default="hya_patch")
     parser.add_argument("--output", required=True, help="Destination ONNX path")
@@ -51,6 +52,7 @@ def main():
         batch=args.batch,
         device=args.device,
         workers=args.workers,
+        cache=args.cache,
         project=str(project_dir),
         name=args.name,
         exist_ok=True,
