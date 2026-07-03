@@ -13,9 +13,10 @@ const state = {
   selectedBox: -1,
   drawing: null,
   trainTimer: null,
+  trainJobWasRunning: false,
   selectedImages: new Set(),
   trainPythonOptions: {},
-  patchModel: {exists: false, path: ''},
+  patchModel: {exists: false, path: '', pt_exists: false, pt_path: ''},
   legacyModel: {available: true, error: ''},
   oas: {configs: [], default_config: '', root: '', config_dir: ''}
 };
@@ -245,8 +246,10 @@ function frameMatchesFilter(frame) {
   const query = ($('frameSearchInput')?.value || '').trim().toLowerCase();
   const onlyLabeled = $('onlyLabeledInput')?.checked || false;
   const onlyUnlabeled = $('onlyUnlabeledInput')?.checked || false;
+  const onlyUntrained = $('onlyUntrainedInput')?.checked || false;
   if (onlyLabeled && frame.boxes.length === 0) return false;
   if (onlyUnlabeled && frame.boxes.length > 0) return false;
+  if (onlyUntrained && (frame.trained || frame.boxes.length === 0)) return false;
   if (labelFilter && !frame.boxes.some(box => box.label === labelFilter)) return false;
   if (!query) return true;
 
@@ -287,7 +290,8 @@ function renderFrameList() {
     const title = document.createElement('button');
     title.type = 'button';
     title.className = 'frame-open';
-    title.textContent = `${visibleIndex + 1}. ${frame.name} (${frame.boxes.length})`;
+    const trainMark = frame.boxes.length ? (frame.trained ? ' · 已训' : ' · 未训') : '';
+    title.textContent = `${visibleIndex + 1}. ${frame.name} (${frame.boxes.length})${trainMark}`;
     title.onclick = () => openFrame(index);
 
     item.appendChild(checkbox);
@@ -299,7 +303,8 @@ function renderFrameList() {
 
 function renderFrameSummary(visibleCount = filteredFrameEntries().length) {
   const selectedCount = state.selectedImages.size;
-  $('frameSummary').textContent = `${state.split}: ${visibleCount}/${state.frames.length} 张，已选 ${selectedCount} 张`;
+  const untrained = state.frames.filter(frame => frame.boxes.length > 0 && !frame.trained).length;
+  $('frameSummary').textContent = `${state.split}: ${visibleCount}/${state.frames.length} 张，未训练 ${untrained} 张，已选 ${selectedCount} 张`;
   $('moveTrainBtn').disabled = selectedCount === 0 || state.split === 'train';
   $('moveValBtn').disabled = selectedCount === 0 || state.split === 'val';
   $('deleteFramesBtn').disabled = selectedCount === 0;
@@ -310,7 +315,10 @@ function frameFromImageRel(image) {
     image,
     name: image.split('/').pop() || image,
     boxes: [],
-    mtime: Date.now() / 1000
+    mtime: Date.now() / 1000,
+    trained: false,
+    trained_at: '',
+    last_train_run: ''
   };
 }
 
@@ -589,7 +597,12 @@ async function saveImageAnnotations(image, boxes) {
     renderClasses();
   }
   const frame = state.frames.find(item => item.image === image);
-  if (frame) frame.boxes = data.boxes;
+  if (frame) {
+    frame.boxes = data.boxes;
+    frame.trained = false;
+    frame.trained_at = '';
+    frame.last_train_run = '';
+  }
   if (state.frames[state.index]?.image === image) {
     state.boxes = data.boxes.map(box => ({...box}));
   }
@@ -712,13 +725,26 @@ function trainSettings() {
   return {
     python: $('trainPythonInput').value || null,
     model: $('trainModelInput').value || 'yolov8n.pt',
+    mode: $('trainModeInput').value || 'full',
     epochs: Number($('trainEpochsInput').value || 120),
     imgsz: Number($('trainImgszInput').value || 640),
     batch: Number($('trainBatchInput').value || 16),
     device: $('trainDeviceInput').value || 'cpu',
     workers: Number($('trainWorkersInput').value || 4),
-    force: $('trainForceInput').checked
+    cache: $('trainCacheInput').value || 'ram',
+    force: $('trainForceInput').checked,
+    archive_existing: $('trainArchiveInput').checked
   };
+}
+
+function useCurrentBestModel() {
+  if (!state.patchModel?.pt_exists || !state.patchModel?.pt_path) {
+    setStatus('还没有生成 best.pt，先完成一次训练后才能继续训练。');
+    return;
+  }
+  $('trainModelInput').value = state.patchModel.pt_path;
+  $('trainModeInput').value = 'incremental';
+  setStatus('已切换为当前 best.pt，训练方式设为“增量未训练”。');
 }
 
 function moduleText(modules) {
@@ -857,6 +883,11 @@ function renderTrainStatus(data) {
   updateDeviceOptions(env);
   state.patchModel = data.model || state.patchModel;
   updateDetectModelOptions();
+  const useBestBtn = $('useBestModelBtn');
+  if (useBestBtn) {
+    useBestBtn.disabled = !state.patchModel.pt_exists || job.running || install.running;
+    useBestBtn.title = state.patchModel.pt_exists ? state.patchModel.pt_path : '还没有训练生成 best.pt';
+  }
 
   const warnings = dataset.warnings.length
     ? `<div class="warn-text">${dataset.warnings.join('<br>')}</div>`
@@ -869,6 +900,10 @@ function renderTrainStatus(data) {
     ? '安装中'
     : (install.exit_code === null ? '未启动' : (install.exit_code === 0 ? '已完成' : `失败 ${install.exit_code}`));
   const modelText = data.model.exists ? '已生成' : '未生成';
+  const ptText = data.model.pt_exists ? 'best.pt 可用' : 'best.pt 未生成';
+  const archiveText = data.model.latest_archive
+    ? `最近备份：${escapeHtml(data.model.latest_archive.id)}`
+    : '最近备份：无';
   const envText = env.ok ? '可训练' : '缺依赖';
   const commandText = [
     ...data.commands.prepare,
@@ -890,10 +925,12 @@ function renderTrainStatus(data) {
       <div><b>${dataset.train.boxes}</b><span>train 框</span></div>
       <div><b>${dataset.val.boxes}</b><span>val 框</span></div>
       <div><b>${dataset.classes.length}</b><span>类别</span></div>
+      <div><b>${dataset.train.untrained_labeled_images}</b><span>未训练图</span></div>
     </div>
     <div class="train-line">环境：${envText} · ${moduleText(env.modules)}</div>
     <div class="train-line">${escapeHtml(gpuText(env))}</div>
-    <div class="train-line">安装：${installText} · 任务：${jobText} · 模型：${modelText}</div>
+    <div class="train-line">安装：${installText} · 任务：${jobText} · 模型：${modelText} · ${ptText}</div>
+    <div class="train-line">${archiveText}</div>
     ${envError}
     ${gpuWarning}
     ${warnings}
@@ -910,6 +947,11 @@ function renderTrainStatus(data) {
   $('installCudaDepsBtn').disabled = job.running || install.running || !env.exists || !((env.gpu || {}).hardware || []).length || (env.gpu || {}).usable;
   $('trainStartBtn').disabled = job.running || install.running || !env.ok || selectedGpuWithoutCuda;
   $('trainStopBtn').disabled = !job.running;
+  const finishedTrainingNow = state.trainJobWasRunning && !job.running;
+  state.trainJobWasRunning = job.running;
+  if (finishedTrainingNow) {
+    loadFrames(state.split).catch(error => setStatus(error.message));
+  }
 
   if ((job.running || install.running) && !state.trainTimer) {
     state.trainTimer = window.setInterval(() => {
@@ -1126,9 +1168,15 @@ $('useVenvPythonBtn').onclick = () => {
     updateTrainStatus().catch(error => setStatus(error.message));
   }
 };
+$('useBestModelBtn').onclick = useCurrentBestModel;
 $('installDepsBtn').onclick = () => busy($('installDepsBtn'), installTrainDeps);
 $('installCudaDepsBtn').onclick = () => busy($('installCudaDepsBtn'), () => installTrainDeps('cuda'));
 $('trainDeviceInput').onchange = () => updateTrainStatus().catch(error => setStatus(error.message));
+$('trainModeInput').onchange = () => {
+  if ($('trainModeInput').value === 'incremental' && $('trainModelInput').value === 'yolov8n.pt' && state.patchModel?.pt_exists) {
+    $('trainModelInput').value = state.patchModel.pt_path;
+  }
+};
 $('trainStartBtn').onclick = () => busy($('trainStartBtn'), startTraining);
 $('trainStopBtn').onclick = () => busy($('trainStopBtn'), stopTraining);
 $('frameLabelFilter').onchange = () => {
@@ -1147,7 +1195,14 @@ $('onlyLabeledInput').onchange = () => {
 $('onlyUnlabeledInput').onchange = () => {
   if ($('onlyUnlabeledInput').checked) {
     $('onlyLabeledInput').checked = false;
+    $('onlyUntrainedInput').checked = false;
     $('frameLabelFilter').value = '';
+  }
+  renderFrameList();
+};
+$('onlyUntrainedInput').onchange = () => {
+  if ($('onlyUntrainedInput').checked) {
+    $('onlyUnlabeledInput').checked = false;
   }
   renderFrameList();
 };

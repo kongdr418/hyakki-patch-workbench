@@ -80,6 +80,10 @@
             <input id="onlyUnlabeledInput" type="checkbox">
             只看没标注
           </label>
+          <label class="check">
+            <input id="onlyUntrainedInput" type="checkbox">
+            只看未训练
+          </label>
         </div>
         <div class="row">
           <button id="selectVisibleBtn">选择当前列表</button>
@@ -144,9 +148,19 @@
                   <button id="useOasPythonBtn" type="button">OAS</button>
                 </div>
               </label>
-              <label class="train-field">
+              <label class="train-field train-model-field">
                 <span>基础模型</span>
-                <input id="trainModelInput" type="text" value="yolov8n.pt">
+                <div class="model-row">
+                  <input id="trainModelInput" type="text" value="yolov8n.pt">
+                  <button id="useBestModelBtn" type="button">best.pt</button>
+                </div>
+              </label>
+              <label class="train-field">
+                <span>训练方式</span>
+                <select id="trainModeInput">
+                  <option value="full">全量训练</option>
+                  <option value="incremental">增量未训练</option>
+                </select>
               </label>
               <label class="train-field">
                 <span>设备</span>
@@ -171,12 +185,26 @@
                 <span>Workers</span>
                 <input id="trainWorkersInput" type="number" value="4" min="0" step="1">
               </label>
+              <label class="train-field">
+                <span>缓存</span>
+                <select id="trainCacheInput">
+                  <option value="ram">RAM</option>
+                  <option value="disk">磁盘</option>
+                  <option value="false">关闭</option>
+                </select>
+              </label>
             </div>
-            <div class="train-actions">
+            <div class="train-options">
               <label class="check compact-check">
                 <input id="trainForceInput" type="checkbox">
                 忽略数据量警告
               </label>
+              <label class="check compact-check">
+                <input id="trainArchiveInput" type="checkbox" checked>
+                训练前备份模型
+              </label>
+            </div>
+            <div class="train-actions">
               <button id="installDepsBtn" type="button">安装训练依赖</button>
               <button id="installCudaDepsBtn" type="button">安装显卡版 PyTorch</button>
               <button id="trainCheckBtn" type="button">检查训练</button>
@@ -196,6 +224,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260703-train-perf"></script>
+  <script src="/static/app.js?v=20260703-model-versions"></script>
 </body>
 </html>

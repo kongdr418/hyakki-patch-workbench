@@ -137,8 +137,15 @@ button:disabled {
   gap: 8px;
 }
 
-.python-row button {
+.python-row button,
+.model-row button {
   margin-top: 0;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px;
+  gap: 8px;
 }
 
 .frame-list {
@@ -352,7 +359,7 @@ canvas {
 
 .train-fields {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 8px;
   align-items: end;
 }
@@ -384,9 +391,22 @@ canvas {
   min-width: 0;
 }
 
+.train-model-field {
+  grid-column: span 2;
+  min-width: 0;
+}
+
+.train-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin-top: 10px;
+}
+
 .train-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   align-items: center;
   margin-top: 10px;
@@ -446,12 +466,12 @@ canvas {
 }
 
 @media (max-width: 1280px) {
-  .train-fields,
-  .train-actions {
+  .train-fields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .train-python-field,
+  .train-model-field,
   .train-actions .check {
     grid-column: 1 / -1;
   }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -99,6 +100,7 @@ HYAKKI_DIR = WORKBENCH_ROOT
 STATIC_DIR = HYAKKI_DIR / "collector_static"
 DEFAULT_DATASET_ROOT = HYAKKI_DIR / "datasets" / "patch"
 MODELS_DIR = HYAKKI_DIR / "models"
+MODEL_VERSIONS_DIR = MODELS_DIR / "versions"
 PATCH_LABELS_FILE = MODELS_DIR / "hya_patch_labels.json"
 PATCH_MODEL_FILE = MODELS_DIR / "hya_patch_fp32.onnx"
 TRAIN_SCRIPT = HYAKKI_DIR / "train_patch_model.py"
@@ -143,6 +145,7 @@ _install_process: subprocess.Popen | None = None
 _install_command: list[str] = []
 _install_started_at: float | None = None
 _environment_cache: dict[str, tuple[float, dict]] = {}
+_train_plan: dict | None = None
 
 
 class Store:
@@ -153,6 +156,10 @@ class Store:
     @property
     def classes_path(self) -> Path:
         return self.root / "classes.json"
+
+    @property
+    def training_manifest_path(self) -> Path:
+        return self.root / "training_manifest.json"
 
     def set_root(self, root: str | Path):
         path = Path(root)
@@ -226,6 +233,7 @@ class VideoIn(BaseModel):
 class TrainStartIn(BaseModel):
     python: str | None = None
     model: str = "yolov8n.pt"
+    mode: Literal["full", "incremental"] = "full"
     epochs: int = Field(default=120, ge=1, le=1000)
     imgsz: int = Field(default=640, ge=64, le=2048)
     batch: int = Field(default=16, ge=-1, le=256)
@@ -234,6 +242,7 @@ class TrainStartIn(BaseModel):
     cache: str = Field(default="ram")
     name: str = "hya_patch"
     force: bool = False
+    archive_existing: bool = True
 
 
 class TrainDepsIn(BaseModel):
@@ -640,24 +649,276 @@ def detect_reference_image(path: Path, source: str, conf_threshold: float, iou_t
     raise HTTPException(status_code=400, detail=f"Unknown detect source: {source}")
 
 
-def split_stats(split: str) -> dict:
+def timestamp_id() -> str:
+    return f"{datetime.now().strftime('%Y%m%dT%H%M%S')}_{int(time.time() * 1000) % 1000:03d}"
+
+
+def empty_training_manifest() -> dict:
+    return {
+        "version": 1,
+        "runs": [],
+        "samples": {},
+    }
+
+
+def load_training_manifest() -> dict:
+    path = store.training_manifest_path
+    if not path.exists():
+        return empty_training_manifest()
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return empty_training_manifest()
+    if not isinstance(data, dict):
+        return empty_training_manifest()
+    data.setdefault("version", 1)
+    data.setdefault("runs", [])
+    data.setdefault("samples", {})
+    return data
+
+
+def save_training_manifest(manifest: dict):
+    store.training_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with store.training_manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+
+def sample_digest_for_files(image_file: Path, label_file: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(image_file.read_bytes())
+    digest.update(b"\0labels\0")
+    if label_file.exists():
+        digest.update(label_file.read_bytes())
+    return digest.hexdigest()
+
+
+def sample_training_state(
+    image_rel: str,
+    image_file: Path | None = None,
+    label_file: Path | None = None,
+    manifest: dict | None = None,
+) -> dict:
+    if image_file is None or label_file is None:
+        image_file, split = image_path(image_rel)
+        label_file = store.root / "labels" / split / f"{image_file.stem}.txt"
+    if not label_file.exists() or not label_file.read_text(encoding="utf-8").strip():
+        return {"trained": False, "digest": "", "last_run": "", "trained_at": ""}
+
+    digest = sample_digest_for_files(image_file, label_file)
+    manifest = manifest or load_training_manifest()
+    record = manifest.get("samples", {}).get(image_rel) or {}
+    trained = record.get("digest") == digest
+    return {
+        "trained": trained,
+        "digest": digest,
+        "last_run": record.get("last_run", "") if trained else "",
+        "trained_at": record.get("trained_at", "") if trained else "",
+    }
+
+
+def labeled_image_items(split: str, manifest: dict | None = None) -> list[dict]:
     image_dir = store.root / "images" / split
     label_dir = store.root / "labels" / split
-    images = sorted(image_dir.glob("*.png"))
-    labeled_images = 0
-    boxes = 0
-    for image_file in images:
+    manifest = manifest or load_training_manifest()
+    items = []
+    for image_file in sorted(image_dir.glob("*.png"), key=lambda p: p.stat().st_mtime):
         label_file = label_dir / f"{image_file.stem}.txt"
         if not label_file.exists():
             continue
         lines = [line for line in label_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if lines:
-            labeled_images += 1
-            boxes += len(lines)
+        if not lines:
+            continue
+        rel = f"{split}/{image_file.name}"
+        train_state = sample_training_state(rel, image_file, label_file, manifest)
+        items.append({
+            "image": rel,
+            "path": image_file,
+            "label_path": label_file,
+            "boxes": len(lines),
+            "digest": train_state["digest"],
+            "trained": train_state["trained"],
+        })
+    return items
+
+
+def write_training_subset_yaml(run_id: str, train_items: list[dict], val_items: list[dict], classes: list[dict]) -> Path:
+    subset_dir = TRAIN_RUNS_DIR / "datasets" / run_id
+    subset_dir.mkdir(parents=True, exist_ok=True)
+    train_txt = subset_dir / "train.txt"
+    val_txt = subset_dir / "val.txt"
+    train_txt.write_text(
+        "\n".join(item["path"].as_posix() for item in train_items) + ("\n" if train_items else ""),
+        encoding="utf-8",
+    )
+    val_txt.write_text(
+        "\n".join(item["path"].as_posix() for item in val_items) + ("\n" if val_items else ""),
+        encoding="utf-8",
+    )
+    names = "\n".join(f"  {index}: {item['label']}" for index, item in enumerate(classes))
+    data_yaml = (
+        f"path: {store.root.as_posix()}\n"
+        f"train: {train_txt.as_posix()}\n"
+        f"val: {val_txt.as_posix()}\n"
+        "names:\n"
+        f"{names}\n"
+    )
+    data_yaml_path = subset_dir / "data.yaml"
+    data_yaml_path.write_text(data_yaml, encoding="utf-8")
+    return data_yaml_path
+
+
+def prepare_training_dataset(mode: str, run_id: str) -> dict:
+    classes = store.load_classes()
+    manifest = load_training_manifest()
+    train_items = labeled_image_items("train", manifest)
+    val_items = labeled_image_items("val", manifest)
+    selected_train = [item for item in train_items if not item["trained"]] if mode == "incremental" else train_items
+    if not selected_train:
+        detail = "没有可用于训练的已标注 train 图片"
+        if mode == "incremental":
+            detail = "没有新的已标注 train 图片；所有当前 train 标注都已经进入过模型训练"
+        raise HTTPException(status_code=400, detail=detail)
+    data_yaml_path = store.root / "data.yaml"
+    if mode == "incremental":
+        data_yaml_path = write_training_subset_yaml(run_id, selected_train, val_items, classes)
+    return {
+        "data_yaml": data_yaml_path,
+        "classes": classes,
+        "train_items": selected_train,
+        "val_items": val_items,
+        "all_train_items": train_items,
+    }
+
+
+def archive_current_model(reason: str = "before_train") -> dict | None:
+    artifacts = [
+        (PATCH_PT_MODEL_FILE, "best.pt"),
+        (PATCH_PT_MODEL_FILE.with_name("last.pt"), "last.pt"),
+        (PATCH_PT_MODEL_FILE.with_suffix(".onnx"), "best.onnx"),
+        (PATCH_MODEL_FILE, PATCH_MODEL_FILE.name),
+        (PATCH_LABELS_FILE, PATCH_LABELS_FILE.name),
+        (store.root / "data.yaml", "data.yaml"),
+        (store.classes_path, "classes.json"),
+    ]
+    existing = [(source, name) for source, name in artifacts if source.exists()]
+    if not existing:
+        return None
+
+    archive_id = timestamp_id()
+    target_dir = MODEL_VERSIONS_DIR / archive_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for source, name in existing:
+        target = target_dir / name
+        shutil.copy2(source, target)
+        copied.append({
+            "source": str(source),
+            "archive": str(target),
+        })
+    manifest = {
+        "id": archive_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "reason": reason,
+        "files": copied,
+    }
+    with (target_dir / "manifest.json").open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return {
+        "id": archive_id,
+        "path": str(target_dir),
+        "files": copied,
+    }
+
+
+def latest_model_archive() -> dict | None:
+    if not MODEL_VERSIONS_DIR.exists():
+        return None
+    archives = sorted([path for path in MODEL_VERSIONS_DIR.iterdir() if path.is_dir()])
+    if not archives:
+        return None
+    latest = archives[-1]
+    manifest_path = latest / "manifest.json"
+    created_at = ""
+    if manifest_path.exists():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as f:
+                created_at = (json.load(f) or {}).get("created_at", "")
+        except Exception:
+            created_at = ""
+    return {
+        "id": latest.name,
+        "path": str(latest),
+        "created_at": created_at,
+    }
+
+
+def patch_model_status() -> dict:
+    predict_model = patch_predict_model_file()
+    return {
+        "path": str(PATCH_MODEL_FILE),
+        "exists": PATCH_MODEL_FILE.exists(),
+        "mtime": PATCH_MODEL_FILE.stat().st_mtime if PATCH_MODEL_FILE.exists() else None,
+        "pt_path": str(PATCH_PT_MODEL_FILE),
+        "pt_exists": PATCH_PT_MODEL_FILE.exists(),
+        "pt_mtime": PATCH_PT_MODEL_FILE.stat().st_mtime if PATCH_PT_MODEL_FILE.exists() else None,
+        "predict_path": str(predict_model) if predict_model else None,
+        "predict_exists": predict_model is not None,
+        "latest_archive": latest_model_archive(),
+    }
+
+
+def finalize_train_plan(exit_code: int | None):
+    global _train_plan
+
+    if _train_plan is None or _train_plan.get("finalized"):
+        return
+    plan = _train_plan
+    finished_at = datetime.now().isoformat(timespec="seconds")
+    status = "finished" if exit_code == 0 else "failed"
+    manifest = load_training_manifest()
+    run_record = {
+        "id": plan["id"],
+        "status": status,
+        "exit_code": exit_code,
+        "mode": plan["mode"],
+        "started_at": plan["started_at"],
+        "finished_at": finished_at,
+        "base_model": plan["base_model"],
+        "data_yaml": plan["data_yaml"],
+        "train_images": plan["train_images"],
+        "val_images": plan["val_images"],
+        "archive": plan.get("archive"),
+    }
+    manifest.setdefault("runs", []).append(run_record)
+    if exit_code == 0:
+        for image_rel, digest in plan["sample_digests"].items():
+            manifest.setdefault("samples", {})[image_rel] = {
+                "digest": digest,
+                "last_run": plan["id"],
+                "trained_at": finished_at,
+            }
+    save_training_manifest(manifest)
+    plan["finalized"] = True
+    plan["status"] = status
+    plan["exit_code"] = exit_code
+    plan["finished_at"] = finished_at
+
+
+def split_stats(split: str) -> dict:
+    image_dir = store.root / "images" / split
+    images = sorted(image_dir.glob("*.png"))
+    items = labeled_image_items(split)
+    labeled_images = len(items)
+    boxes = sum(item["boxes"] for item in items)
+    untrained_items = [item for item in items if not item["trained"]]
     return {
         "images": len(images),
         "labeled_images": labeled_images,
         "boxes": boxes,
+        "trained_labeled_images": labeled_images - len(untrained_items),
+        "untrained_labeled_images": len(untrained_items),
+        "untrained_boxes": sum(item["boxes"] for item in untrained_items),
     }
 
 
@@ -977,6 +1238,8 @@ def current_train_job() -> dict:
             "started_at": _train_started_at,
         }
     exit_code = _train_process.poll()
+    if exit_code is not None:
+        finalize_train_plan(exit_code)
     return {
         "running": exit_code is None,
         "exit_code": exit_code,
@@ -1017,13 +1280,7 @@ def training_status(path: str | None = None, device: str = "cpu") -> dict:
         "install": current_install_job(),
         "log": train_log_tail(),
         "install_log": install_log_tail(),
-        "model": {
-            "path": str(PATCH_MODEL_FILE),
-            "exists": PATCH_MODEL_FILE.exists(),
-            "mtime": PATCH_MODEL_FILE.stat().st_mtime if PATCH_MODEL_FILE.exists() else None,
-            "predict_path": str(patch_predict_model_file()) if patch_predict_model_file() else None,
-            "predict_exists": patch_predict_model_file() is not None,
-        },
+        "model": patch_model_status(),
     }
 
 
@@ -1069,14 +1326,19 @@ def read_annotations(image_rel: str, classes: list[dict]) -> list[dict]:
     return result
 
 
-def frame_item(path: Path, split: str, classes: list[dict]) -> dict:
+def frame_item(path: Path, split: str, classes: list[dict], manifest: dict | None = None) -> dict:
     rel = f"{split}/{path.name}"
+    label_file = store.root / "labels" / split / f"{path.stem}.txt"
+    train_state = sample_training_state(rel, path, label_file, manifest)
     return {
         "image": rel,
         "name": path.name,
         "split": split,
         "mtime": path.stat().st_mtime,
         "boxes": read_annotations(rel, classes),
+        "trained": train_state["trained"],
+        "trained_at": train_state["trained_at"],
+        "last_train_run": train_state["last_run"],
     }
 
 
@@ -1137,13 +1399,7 @@ def state():
             "patch_labels": str(PATCH_LABELS_FILE),
             "data_yaml": str(store.root / "data.yaml"),
         },
-        "patch_model": {
-            "path": str(PATCH_MODEL_FILE),
-            "exists": PATCH_MODEL_FILE.exists(),
-            "mtime": PATCH_MODEL_FILE.stat().st_mtime if PATCH_MODEL_FILE.exists() else None,
-            "predict_path": str(patch_predict_model_file()) if patch_predict_model_file() else None,
-            "predict_exists": patch_predict_model_file() is not None,
-        },
+        "patch_model": patch_model_status(),
         "legacy_model": {
             "available": LegacyTracker is not None,
             "error": LEGACY_IMPORT_ERROR,
@@ -1170,8 +1426,9 @@ def settings(payload: SettingsIn):
 @app.get("/api/frames")
 def frames(split: Literal["train", "val"] = "train"):
     classes = store.load_classes()
+    manifest = load_training_manifest()
     files = sorted((store.root / "images" / split).glob("*.png"), key=lambda p: p.stat().st_mtime)
-    return {"frames": [frame_item(path, split, classes) for path in files]}
+    return {"frames": [frame_item(path, split, classes, manifest) for path in files]}
 
 
 @app.post("/api/frames/move")
@@ -1499,7 +1756,7 @@ def train_install_deps(payload: TrainDepsIn):
 
 @app.post("/api/train/start")
 def train_start(payload: TrainStartIn):
-    global _train_process, _train_command, _train_started_at
+    global _train_process, _train_command, _train_started_at, _train_plan
 
     job = current_train_job()
     if job["running"]:
@@ -1523,12 +1780,24 @@ def train_start(payload: TrainStartIn):
     if payload.device != "cpu" and not environment["gpu"]["usable"]:
         raise HTTPException(status_code=400, detail=environment["gpu"]["reason"] or "当前环境不能使用显卡训练")
 
+    run_id = timestamp_id()
+    base_model = payload.model.strip() if payload.model else "yolov8n.pt"
+    if payload.mode == "incremental":
+        if not PATCH_PT_MODEL_FILE.exists():
+            raise HTTPException(status_code=400, detail=f"增量训练需要先有当前 best.pt: {PATCH_PT_MODEL_FILE}")
+        if base_model == "yolov8n.pt":
+            base_model = str(PATCH_PT_MODEL_FILE)
+    prepared = prepare_training_dataset(payload.mode, run_id)
+    train_items = prepared["train_items"]
+    val_items = prepared["val_items"]
+    archive = archive_current_model("before_train") if payload.archive_existing else None
+
     TRAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     _train_command = [
         environment["python"],
         str(TRAIN_SCRIPT),
-        "--data", str(store.root / "data.yaml"),
-        "--model", payload.model,
+        "--data", str(prepared["data_yaml"]),
+        "--model", base_model,
         "--epochs", str(payload.epochs),
         "--imgsz", str(payload.imgsz),
         "--batch", str(payload.batch),
@@ -1540,9 +1809,26 @@ def train_start(payload: TrainStartIn):
         "--output", str(PATCH_MODEL_FILE),
     ]
     _train_started_at = time.time()
+    _train_plan = {
+        "id": run_id,
+        "mode": payload.mode,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "base_model": base_model,
+        "data_yaml": str(prepared["data_yaml"]),
+        "train_images": [item["image"] for item in train_items],
+        "val_images": [item["image"] for item in val_items],
+        "sample_digests": {item["image"]: item["digest"] for item in train_items},
+        "archive": archive,
+        "finalized": False,
+    }
     TRAIN_LOG_FILE.write_text(
         "Hyakkiyakou patch training\n"
         f"dataset: {store.root}\n"
+        f"run: {run_id}\n"
+        f"mode: {payload.mode}\n"
+        f"train images: {len(train_items)}\n"
+        f"val images: {len(val_items)}\n"
+        f"archive: {archive['path'] if archive else 'none'}\n"
         f"command: {' '.join(_train_command)}\n\n",
         encoding="utf-8",
     )

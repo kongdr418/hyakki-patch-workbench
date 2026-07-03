@@ -12,6 +12,7 @@ runs/
 *.pt
 models/*.onnx
 models/hya_patch_labels.json
+models/versions/
 
 # Logs, caches, and temporary files
 config.local.json
