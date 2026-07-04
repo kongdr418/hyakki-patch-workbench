@@ -73,6 +73,24 @@ function renderOasConfigs() {
   }
 }
 
+function renderOasRoot() {
+  const input = $('oasRootInput');
+  const note = $('oasRootNote');
+  if (!input || !note) return;
+  const configured = state.oas.configured_root || '';
+  const effective = state.oas.root || '';
+  if (!input.value) {
+    input.value = configured || effective;
+  }
+  if (configured && configured !== effective) {
+    note.textContent = `当前生效: ${effective}；已保存: ${configured}，重启工作台后生效。`;
+  } else if (effective) {
+    note.textContent = `当前生效: ${effective}`;
+  } else {
+    note.textContent = '请选择包含 toolkit、module、tasks 的 OAS 根目录。';
+  }
+}
+
 function detectSourceName(source = $('detectModelInput')?.value || 'legacy') {
   if (source === 'patch') return '训练模型';
   if (source === 'both') return '双模型';
@@ -326,6 +344,14 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function pickDirectory(title, initial = '') {
+  const data = await api('/api/pick-directory', {
+    method: 'POST',
+    body: JSON.stringify({title, initial}),
+  });
+  return data.cancelled ? '' : (data.path || '');
+}
+
 async function loadState() {
   const data = await api('/api/state');
   state.root = data.root;
@@ -337,6 +363,7 @@ async function loadState() {
   state.oas = data.oas || {configs: [], default_config: '', root: '', config_dir: ''};
   $('rootInput').value = state.root;
   renderOasConfigs();
+  renderOasRoot();
   renderClasses();
   updateDetectModelOptions();
   renderModelVersionOptions();
@@ -1304,12 +1331,39 @@ async function busy(button, task) {
   }
 }
 
+$('saveOasRootBtn').onclick = () => busy($('saveOasRootBtn'), async () => {
+  const selected = await pickDirectory('选择 OAS 根目录', $('oasRootInput').value || state.oas.root || '');
+  if (!selected) {
+    setStatus('已取消选择 OAS 根目录');
+    return;
+  }
+  $('oasRootInput').value = selected;
+  const data = await api('/api/oas-root', {
+    method: 'POST',
+    body: JSON.stringify({oas_root: selected}),
+  });
+  state.oas.configured_root = data.saved_oas_root;
+  state.oas.restart_required = data.restart_required;
+  renderOasRoot();
+  setStatus(data.restart_required
+    ? `OAS 根目录已保存，重启工作台后生效: ${data.saved_oas_root}`
+    : `OAS 根目录已是当前生效目录: ${data.saved_oas_root}`);
+});
+
 $('saveRootBtn').onclick = () => busy($('saveRootBtn'), async () => {
-  const data = await api('/api/settings', {method: 'POST', body: JSON.stringify({root: $('rootInput').value})});
+  const selected = await pickDirectory('选择数据集目录', $('rootInput').value || state.root || '');
+  if (!selected) {
+    setStatus('已取消选择数据集目录');
+    return;
+  }
+  $('rootInput').value = selected;
+  const data = await api('/api/settings', {method: 'POST', body: JSON.stringify({root: selected})});
   state.root = data.root;
   state.classes = data.classes;
+  state.classUsage = data.class_usage || {};
   renderClasses();
   await loadFrames(state.split);
+  setStatus(`数据集目录已切换到 ${state.root}`);
 });
 
 $('addClassBtn').onclick = () => busy($('addClassBtn'), async () => {

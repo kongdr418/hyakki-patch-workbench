@@ -12,9 +12,13 @@
     <aside class="side">
       <section class="panel">
         <h1>百鬼采集</h1>
+        <label>OAS 根目录</label>
+        <input id="oasRootInput" type="text" placeholder="点击下方按钮选择 OAS 根目录" readonly>
+        <button id="saveOasRootBtn">选择OAS目录</button>
+        <div id="oasRootNote" class="field-note"></div>
         <label>数据集目录</label>
-        <input id="rootInput" type="text">
-        <button id="saveRootBtn">切换目录</button>
+        <input id="rootInput" type="text" readonly>
+        <button id="saveRootBtn">选择数据集</button>
       </section>
 
       <section class="panel">

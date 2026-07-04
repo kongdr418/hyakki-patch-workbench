@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -38,6 +39,17 @@ def load_workbench_config() -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def save_workbench_config(updates: dict) -> dict:
+    WORKBENCH_ROOT.mkdir(parents=True, exist_ok=True)
+    config = load_workbench_config()
+    config.update({key: value for key, value in updates.items() if value is not None})
+    with LOCAL_CONFIG_FILE.open("w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    WORKBENCH_CONFIG.clear()
+    WORKBENCH_CONFIG.update(config)
+    return config
 
 
 WORKBENCH_CONFIG = load_workbench_config()
@@ -150,6 +162,7 @@ _install_process: subprocess.Popen | None = None
 _install_command: list[str] = []
 _install_started_at: float | None = None
 _environment_cache: dict[str, tuple[float, dict]] = {}
+_directory_picker_lock = threading.Lock()
 _train_plan: dict | None = None
 
 
@@ -208,6 +221,15 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 class SettingsIn(BaseModel):
     root: str
+
+
+class OasRootIn(BaseModel):
+    oas_root: str = Field(min_length=1)
+
+
+class DirectoryPickIn(BaseModel):
+    title: str = "选择目录"
+    initial: str | None = None
 
 
 class ClassIn(BaseModel):
@@ -395,6 +417,124 @@ def resolve_oas_config_name(config_name: str | None) -> str:
             detail=f"No OAS config found in {OAS_ROOT / 'config'}",
         )
     return name
+
+
+def normalize_oas_root_path(path: str) -> Path:
+    raw = path.strip().strip('"')
+    if not raw:
+        raise HTTPException(status_code=400, detail="OAS 根目录不能为空")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = WORKBENCH_ROOT / candidate
+    return candidate.resolve()
+
+
+def configured_oas_root() -> str:
+    value = str(WORKBENCH_CONFIG.get("oas_root") or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(normalize_oas_root_path(value))
+    except HTTPException:
+        return value
+    except OSError:
+        return value
+
+
+def oas_restart_required(saved_root: Path | None = None) -> bool:
+    root = saved_root
+    if root is None:
+        configured = configured_oas_root()
+        if not configured:
+            return False
+        try:
+            root = Path(configured).resolve()
+        except OSError:
+            return False
+    try:
+        return root.resolve() != OAS_ROOT.resolve()
+    except OSError:
+        return str(root) != str(OAS_ROOT)
+
+
+def save_oas_root_config(oas_root: str) -> dict:
+    root = normalize_oas_root_path(oas_root)
+    if not is_oas_root(root):
+        raise HTTPException(
+            status_code=400,
+            detail=f"不是有效的 OAS 根目录: {root}。需要包含 toolkit\\python.exe、module\\config\\config.py、tasks\\Hyakkiyakou",
+        )
+    save_workbench_config({"oas_root": str(root)})
+    return {
+        "saved_oas_root": str(root),
+        "effective_oas_root": str(OAS_ROOT),
+        "restart_required": oas_restart_required(root),
+        "local_config": str(LOCAL_CONFIG_FILE),
+    }
+
+
+def pick_directory(title: str, initial: str | None = None) -> dict:
+    if os.name != "nt":
+        raise HTTPException(status_code=501, detail="当前仅支持 Windows 原生目录选择器")
+    if not _directory_picker_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有目录选择窗口打开，请先完成或取消那个窗口")
+    try:
+        powershell = Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        powershell_path = str(powershell) if powershell.exists() else "powershell.exe"
+        title_b64 = base64.b64encode((title or "选择目录").encode("utf-8")).decode("ascii")
+        initial_b64 = base64.b64encode((initial or "").encode("utf-8")).decode("ascii")
+        script = r'''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$title = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))
+$initial = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[1]))
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = $title
+$dialog.ShowNewFolderButton = $true
+if ($initial -and (Test-Path -LiteralPath $initial)) {
+    $dialog.SelectedPath = (Resolve-Path -LiteralPath $initial).ProviderPath
+}
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = $title
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.ShowInTaskbar = $true
+$owner.TopMost = $true
+$owner.Opacity = 0
+$owner.Show()
+$owner.Activate()
+$owner.BringToFront()
+$result = $dialog.ShowDialog($owner)
+$owner.Close()
+$owner.Dispose()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dialog.SelectedPath
+}
+'''
+        try:
+            result = subprocess.run(
+                [powershell_path, "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, title_b64, initial_b64],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=180,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=408, detail="选择目录超时；如果没有看到弹窗，请用普通 PowerShell 启动工作台，或手动输入路径") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"无法打开目录选择器: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or "目录选择器启动失败"
+            raise HTTPException(status_code=500, detail=detail)
+        selected = result.stdout.strip()
+        if not selected:
+            return {"path": "", "cancelled": True}
+        return {"path": selected, "cancelled": False}
+    finally:
+        _directory_picker_lock.release()
 
 
 def ensure_annotation_classes(classes: list[dict], labels: list[str]) -> tuple[list[dict], list[dict]]:
@@ -1877,6 +2017,8 @@ def state():
         "oas": {
             "root": str(OAS_ROOT),
             "exists": OAS_ROOT.exists(),
+            "configured_root": configured_oas_root(),
+            "restart_required": oas_restart_required(),
             "config_dir": str(OAS_ROOT / "config"),
             "configs": oas_config_names(),
             "default_config": default_oas_config_name(),
@@ -1891,6 +2033,16 @@ def state():
 def settings(payload: SettingsIn):
     store.set_root(payload.root)
     return state()
+
+
+@app.post("/api/oas-root")
+def oas_root_settings(payload: OasRootIn):
+    return save_oas_root_config(payload.oas_root)
+
+
+@app.post("/api/pick-directory")
+def pick_directory_api(payload: DirectoryPickIn):
+    return pick_directory(payload.title, payload.initial)
 
 
 @app.get("/api/frames")
