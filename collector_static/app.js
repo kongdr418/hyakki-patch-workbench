@@ -1,6 +1,7 @@
 const state = {
   root: '',
   classes: [],
+  legacyClasses: [],
   split: 'train',
   frames: [],
   index: -1,
@@ -35,6 +36,7 @@ const RARITY_NAMES = {
   buff: 'BUFF',
   other: '其他'
 };
+const AUTO_ANNOTATE_CONF_THRESHOLD = 0.8;
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -118,6 +120,48 @@ function updateDetectModelOptions() {
   if (select.value === 'legacy' && !hasLegacyModel && hasPatchModel) {
     select.value = 'patch';
   }
+  updateModelVersionEnabled();
+}
+
+function renderModelVersionOptions() {
+  const select = $('detectModelVersionInput');
+  if (!select) return;
+  const oldValue = select.value;
+  const archives = (state.patchModel && state.patchModel.archives) || [];
+  select.innerHTML = '<option value="">当前模型</option>';
+  for (const archive of archives) {
+    if (!archive.best_pt_path) continue;
+    const option = document.createElement('option');
+    option.value = archive.best_pt_path;
+    const labelParts = [archive.id];
+    if (archive.created_at) labelParts.push(archive.created_at);
+    option.textContent = `${labelParts.join(' · ')}`;
+    option.dataset.labelsPath = archive.labels_path || '';
+    select.appendChild(option);
+  }
+  if (oldValue && Array.from(select.options).some(opt => opt.value === oldValue)) {
+    select.value = oldValue;
+  }
+  updateModelVersionEnabled();
+}
+
+function updateModelVersionEnabled() {
+  const versionSelect = $('detectModelVersionInput');
+  const mainSelect = $('detectModelInput');
+  if (!versionSelect || !mainSelect) return;
+  const needsPatch = mainSelect.value === 'patch' || mainSelect.value === 'both';
+  const hasArchives = versionSelect.options.length > 1;
+  versionSelect.disabled = !needsPatch || !hasArchives;
+}
+
+function selectedPatchModel() {
+  const select = $('detectModelVersionInput');
+  if (!select || !select.value) return { patch_model_path: null, patch_labels_path: null };
+  const option = select.selectedOptions[0];
+  return {
+    patch_model_path: select.value,
+    patch_labels_path: option && option.dataset.labelsPath ? option.dataset.labelsPath : null,
+  };
 }
 
 function classRarity(item) {
@@ -130,8 +174,8 @@ function labelNumber(label) {
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
-function sortedClasses() {
-  return [...state.classes].sort((a, b) => {
+function sortClassList(items) {
+  return [...items].sort((a, b) => {
     const rarityA = classRarity(a);
     const rarityB = classRarity(b);
     const orderA = RARITY_ORDER.includes(rarityA) ? RARITY_ORDER.indexOf(rarityA) : RARITY_ORDER.length;
@@ -142,6 +186,19 @@ function sortedClasses() {
     if (numberA !== numberB) return numberA - numberB;
     return String(a.label).localeCompare(String(b.label), 'zh-Hans-CN');
   });
+}
+
+function sortedClasses() {
+  return sortClassList(state.classes);
+}
+
+function pickerClasses() {
+  const legacyLabels = new Set((state.legacyClasses || []).map(item => item.label));
+  const legacyItems = (state.legacyClasses || []).map(item => ({ ...item, isLegacy: true }));
+  const customItems = (state.classes || [])
+    .filter(item => !legacyLabels.has(item.label))
+    .map(item => ({ ...item, isLegacy: false }));
+  return [...legacyItems, ...customItems];
 }
 
 function appendClassOptions(select, classes) {
@@ -158,8 +215,59 @@ function appendClassOptions(select, classes) {
     const option = document.createElement('option');
     option.value = item.label;
     option.textContent = `${item.label} · ${item.name}`;
+    if (item.isLegacy === true) {
+      option.classList.add('class-legacy');
+      option.title = 'OAS 原模型内置标签';
+    }
+    if (item.isLegacy === false) {
+      option.classList.add('class-custom');
+      option.title = '训练集自定义标签';
+    }
     groupElement.appendChild(option);
   }
+}
+
+function isLegacyClassLabel(label) {
+  return (state.legacyClasses || []).some(item => item.label === label);
+}
+
+function updateDeleteClassAvailability() {
+  const button = $('deleteClassBtn');
+  const select = $('classSelect');
+  if (!button || !select) return;
+  const legacy = isLegacyClassLabel(select.value);
+  button.disabled = legacy;
+  button.title = legacy ? 'OAS 原模型内置标签不可删除' : '删除当前选中的自定义标签';
+}
+
+function formatApiDetail(detail, fallback = '请求失败') {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(item => formatApiDetail(item, '')).filter(Boolean).join('；') || fallback;
+  }
+  if (typeof detail === 'object') {
+    const parts = [];
+    if (detail.message) parts.push(detail.message);
+    if (detail.error) parts.push(`错误: ${detail.error}`);
+    if (detail.label) parts.push(`标签: ${detail.label}`);
+    if (Number.isFinite(detail.total_boxes)) parts.push(`标注框: ${detail.total_boxes}`);
+    if (Array.isArray(detail.affected)) {
+      const preview = detail.affected
+        .slice(0, 5)
+        .map(item => item && item.image ? `${item.image}${item.boxes ? `(${item.boxes})` : ''}` : '')
+        .filter(Boolean)
+        .join('、');
+      parts.push(`影响 ${detail.affected.length} 张图${preview ? `: ${preview}${detail.affected.length > 5 ? '…' : ''}` : ''}`);
+    }
+    if (parts.length) return parts.join('；');
+    try {
+      return JSON.stringify(detail);
+    } catch (_err) {
+      return fallback;
+    }
+  }
+  return String(detail);
 }
 
 async function api(path, options = {}) {
@@ -168,7 +276,13 @@ async function api(path, options = {}) {
     ...options
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || response.statusText);
+  if (!response.ok) {
+    const error = new Error(formatApiDetail(data.detail, response.statusText));
+    error.status = response.status;
+    error.detail = data.detail;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 
@@ -176,13 +290,15 @@ async function loadState() {
   const data = await api('/api/state');
   state.root = data.root;
   state.classes = data.classes;
-  state.patchModel = data.patch_model || {exists: false, path: ''};
+  state.legacyClasses = data.legacy_classes || [];
+  state.patchModel = data.patch_model || {exists: false, path: '', pt_exists: false, pt_path: ''};
   state.legacyModel = data.legacy_model || {available: true, error: ''};
   state.oas = data.oas || {configs: [], default_config: '', root: '', config_dir: ''};
   $('rootInput').value = state.root;
   renderOasConfigs();
   renderClasses();
   updateDetectModelOptions();
+  renderModelVersionOptions();
   renderLegacyList();
   await loadFrames(state.split);
   updateTrainStatus().catch(error => setStatus(error.message));
@@ -194,7 +310,7 @@ function renderClasses() {
   select.innerHTML = '';
   const filter = $('frameLabelFilter');
   const oldFilter = filter ? filter.value : '';
-  const classes = sortedClasses();
+  const classes = sortClassList(pickerClasses());
   if (filter) {
     filter.innerHTML = '<option value="">全部标签</option>';
   }
@@ -208,6 +324,71 @@ function renderClasses() {
   if (Array.from(select.options).some(option => option.value === oldSelect)) {
     select.value = oldSelect;
   }
+  updateDeleteClassAvailability();
+}
+
+async function handleDeleteClass() {
+  const select = $('classSelect');
+  if (!select) return;
+  const label = select.value;
+  if (!label) {
+    setStatus('请先在"当前画框标签"里选一个要删除的标签');
+    return;
+  }
+  if (isLegacyClassLabel(label)) {
+    setStatus(`OAS 原模型内置标签 ${label} 不可删除`);
+    updateDeleteClassAvailability();
+    return;
+  }
+  if (!window.confirm(`确认删除标签 ${label}?\n会先检查是否已有图片使用这个标签。`)) {
+    return;
+  }
+  setStatus(`正在删除 ${label} ...`);
+  try {
+    const result = await api('/api/classes/delete', {
+      method: 'POST',
+      body: JSON.stringify({ label, force: false }),
+    });
+    await finishDeleteClass(label, result);
+  } catch (err) {
+    const detail = err.detail || {};
+    if (err.status === 409 && detail.error === 'class_in_use') {
+      const affected = detail.affected || [];
+      const totalBoxes = detail.total_boxes || affected.reduce((sum, item) => sum + (item.boxes || 0), 0);
+      const preview = affected
+        .slice(0, 8)
+        .map(item => `- ${item.image}：${item.boxes} 框`)
+        .join('\n');
+      const more = affected.length > 8 ? `\n... 另有 ${affected.length - 8} 张` : '';
+      const confirmed = window.confirm(
+        `标签 ${label} 已用于 ${affected.length} 张图、${totalBoxes} 个框。\n` +
+        `继续删除会移除这些框，并重编号后续类别。\n\n${preview}${more}\n\n确认强制删除？`
+      );
+      if (!confirmed) {
+        setStatus(`已取消删除 ${label}`);
+        return;
+      }
+      try {
+        const result = await api('/api/classes/delete', {
+          method: 'POST',
+          body: JSON.stringify({ label, force: true }),
+        });
+        await finishDeleteClass(label, result);
+      } catch (forceErr) {
+        setStatus(`删除失败:${forceErr.message}`);
+      }
+      return;
+    }
+    setStatus(`删除失败:${err.message}`);
+  }
+}
+
+async function finishDeleteClass(label, result) {
+  const removed = result.affected_images || 0;
+  const boxes = result.stripped_boxes || 0;
+  const renum = result.renumbered_files || 0;
+  setStatus(`已删除 ${label}:影响 ${removed} 张图、剥离 ${boxes} 个框、重编号 ${renum} 个标签文件`);
+  await loadState();
 }
 
 async function loadFrames(split, preferredImage = null) {
@@ -613,7 +794,8 @@ function legacySettings() {
   return {
     source: $('detectModelInput')?.value || 'legacy',
     conf_threshold: Number($('legacyConfInput').value || 0.25),
-    iou_threshold: Number($('legacyIouInput').value || 0.7)
+    iou_threshold: Number($('legacyIouInput').value || 0.7),
+    ...selectedPatchModel(),
   };
 }
 
@@ -701,8 +883,12 @@ async function autoAnnotateUnlabeledAndExport() {
   let savedImages = 0;
   let savedBoxes = 0;
   let skippedImages = 0;
+  let filteredLowConf = 0;
   for (const image of targets) {
-    const boxes = boxesFromDetections(predictions[image] || []);
+    const allDetections = predictions[image] || [];
+    const filteredDetections = allDetections.filter(d => (d.conf || 0) >= AUTO_ANNOTATE_CONF_THRESHOLD);
+    filteredLowConf += allDetections.length - filteredDetections.length;
+    const boxes = boxesFromDetections(filteredDetections);
     if (!boxes.length) {
       skippedImages += 1;
       continue;
@@ -718,7 +904,7 @@ async function autoAnnotateUnlabeledAndExport() {
   draw();
   const exported = await api('/api/export', {method: 'POST', body: '{}'});
   await updateTrainStatus();
-  setStatus(`自动标注完成：识别 ${targets.length} 张，参考框 ${detectedBoxes} 个，保存 ${savedImages} 张/${savedBoxes} 框，跳过 ${skippedImages} 张空识别。已导出配置。\n${exported.data_yaml}\n${exported.patch_labels}`);
+  setStatus(`自动标注完成：识别 ${targets.length} 张，参考框 ${detectedBoxes} 个，过滤掉 ${filteredLowConf} 个低置信度(<${AUTO_ANNOTATE_CONF_THRESHOLD})框，保存 ${savedImages} 张/${savedBoxes} 框，跳过 ${skippedImages} 张空识别。已导出配置。\n${exported.data_yaml}\n${exported.patch_labels}`);
 }
 
 function trainSettings() {
@@ -905,6 +1091,9 @@ function renderTrainStatus(data) {
     ? `最近备份：${escapeHtml(data.model.latest_archive.id)}`
     : '最近备份：无';
   const envText = env.ok ? '可训练' : '缺依赖';
+  const envCacheText = env.cached
+    ? ` · 缓存:${env.cache_source === 'file' ? '本地' : '内存'}`
+    : '';
   const commandText = [
     ...data.commands.prepare,
     '',
@@ -927,7 +1116,7 @@ function renderTrainStatus(data) {
       <div><b>${dataset.classes.length}</b><span>类别</span></div>
       <div><b>${dataset.train.untrained_images}</b><span>未训练图</span></div>
     </div>
-    <div class="train-line">环境：${envText} · ${moduleText(env.modules)}</div>
+    <div class="train-line">环境：${envText}${envCacheText} · ${moduleText(env.modules)}</div>
     <div class="train-line">${escapeHtml(gpuText(env))}</div>
     <div class="train-line">安装：${installText} · 任务：${jobText} · 模型：${modelText} · ${ptText}</div>
     <div class="train-line">${archiveText}</div>
@@ -964,10 +1153,11 @@ function renderTrainStatus(data) {
   }
 }
 
-async function updateTrainStatus() {
+async function updateTrainStatus(refreshEnv = false) {
   const params = new URLSearchParams();
   if ($('trainPythonInput').value) params.set('python', $('trainPythonInput').value);
   params.set('device', $('trainDeviceInput').value || 'cpu');
+  if (refreshEnv) params.set('refresh_env', '1');
   const data = await api(`/api/train/status?${params.toString()}`);
   renderTrainStatus(data);
   return data;
@@ -1091,6 +1281,9 @@ $('addClassBtn').onclick = () => busy($('addClassBtn'), async () => {
   setStatus(`已添加 ${data.added.label}`);
 });
 
+$('classSelect').onchange = updateDeleteClassAvailability;
+$('deleteClassBtn').onclick = () => busy($('deleteClassBtn'), handleDeleteClass);
+
 $('captureBtn').onclick = () => busy($('captureBtn'), async () => {
   const configName = oasConfigName();
   const data = await api('/api/capture', {
@@ -1148,14 +1341,27 @@ $('videoBtn').onclick = () => busy($('videoBtn'), async () => {
 $('legacyCurrentBtn').onclick = () => busy($('legacyCurrentBtn'), predictCurrentLegacy);
 $('legacyAllBtn').onclick = () => busy($('legacyAllBtn'), () => predictBatchLegacy());
 $('autoAnnotateBtn').onclick = () => busy($('autoAnnotateBtn'), autoAnnotateUnlabeledAndExport);
+$('autoAnnotateHint').textContent = `自动保存 ≥ ${AUTO_ANNOTATE_CONF_THRESHOLD.toFixed(2)}`;
 $('detectModelInput').onchange = () => {
+  updateModelVersionEnabled();
   setStatus(`已切换为 ${detectSourceName()} 预识别`);
+};
+
+$('detectModelVersionInput').onchange = () => {
+  const select = $('detectModelVersionInput');
+  if (!select) return;
+  const option = select.selectedOptions[0];
+  if (option && option.value) {
+    setStatus(`训练模型版本: ${option.textContent}`);
+  } else {
+    setStatus('训练模型版本: 当前模型');
+  }
 };
 $('showLegacyInput').onchange = () => {
   state.showLegacy = $('showLegacyInput').checked;
   draw();
 };
-$('trainCheckBtn').onclick = () => busy($('trainCheckBtn'), updateTrainStatus);
+$('trainCheckBtn').onclick = () => busy($('trainCheckBtn'), () => updateTrainStatus(true));
 $('useOasPythonBtn').onclick = () => {
   if (state.trainPythonOptions.oas) {
     $('trainPythonInput').value = state.trainPythonOptions.oas;

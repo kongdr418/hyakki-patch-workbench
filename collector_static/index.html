@@ -34,6 +34,7 @@
         <button id="addClassBtn">添加标签</button>
         <label>当前画框标签</label>
         <select id="classSelect"></select>
+        <button id="deleteClassBtn" class="danger-btn" title="删除当前选中的标签">删除</button>
       </section>
 
       <section class="panel">
@@ -125,11 +126,15 @@
                 <option value="patch">训练模型（刚生成）</option>
                 <option value="both">原模型 + 训练模型</option>
               </select>
+              <select id="detectModelVersionInput" title="训练模型版本">
+                <option value="">当前模型</option>
+              </select>
               <input id="legacyConfInput" type="number" value="0.25" min="0.01" max="1" step="0.01" title="置信度">
               <input id="legacyIouInput" type="number" value="0.7" min="0.01" max="1" step="0.01" title="NMS IoU">
               <button id="legacyCurrentBtn">预识别当前图</button>
               <button id="legacyAllBtn">预识别当前分组</button>
               <button id="autoAnnotateBtn">识别未标注并导出</button>
+              <span id="autoAnnotateHint" class="model-hint"></span>
               <label class="check compact-check">
                 <input id="showLegacyInput" type="checkbox" checked>
                 显示参考框

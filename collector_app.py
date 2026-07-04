@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -119,6 +120,8 @@ PIP_DOWNLOAD_TIMEOUT = "300"
 PIP_RETRIES = "10"
 ENV_CHECK_TIMEOUT = 120
 ENV_CHECK_CACHE_SECONDS = 300
+ENV_CHECK_FILE_CACHE_SECONDS = 24 * 60 * 60
+ENV_CHECK_CACHE_FILE = TRAIN_RUNS_DIR / "environment_check_cache.json"
 SAMPLE_DIGEST_VERSION = 2
 
 RARITIES = ("buff", "sp", "ssr", "sr", "r", "n", "g")
@@ -214,6 +217,11 @@ class ClassIn(BaseModel):
     id: int | None = None
 
 
+class DeleteClassIn(BaseModel):
+    label: str
+    force: bool = False
+
+
 class CaptureIn(BaseModel):
     config_name: str = ""
     split: Literal["train", "val"] = "train"
@@ -257,6 +265,8 @@ class LegacyDetectIn(BaseModel):
     source: Literal["legacy", "patch", "both"] = "legacy"
     conf_threshold: float = Field(default=0.25, ge=0.01, le=1)
     iou_threshold: float = Field(default=0.7, ge=0.01, le=1)
+    patch_model_path: str | None = None
+    patch_labels_path: str | None = None
 
 
 class LegacyBatchDetectIn(BaseModel):
@@ -265,6 +275,8 @@ class LegacyBatchDetectIn(BaseModel):
     source: Literal["legacy", "patch", "both"] = "legacy"
     conf_threshold: float = Field(default=0.25, ge=0.01, le=1)
     iou_threshold: float = Field(default=0.7, ge=0.01, le=1)
+    patch_model_path: str | None = None
+    patch_labels_path: str | None = None
 
 
 class BoxIn(BaseModel):
@@ -505,8 +517,9 @@ def detect_legacy_image(path: Path, conf_threshold: float, iou_threshold: float)
     return detections
 
 
-def load_patch_classes() -> list[dict]:
-    labels_path = PATCH_LABELS_FILE if PATCH_LABELS_FILE.exists() else store.classes_path
+def load_patch_classes(labels_path: Path | None = None) -> list[dict]:
+    if labels_path is None:
+        labels_path = PATCH_LABELS_FILE if PATCH_LABELS_FILE.exists() else store.classes_path
     if not labels_path.exists():
         return []
     with labels_path.open("r", encoding="utf-8") as f:
@@ -514,6 +527,118 @@ def load_patch_classes() -> list[dict]:
     if isinstance(raw, dict):
         raw = raw.get("labels", [])
     return [normalize_class_item(item) for item in raw]
+
+
+def find_class_index(classes: list[dict], label: str) -> int:
+    target = label.strip()
+    for index, item in enumerate(classes):
+        if item.get("label") == target:
+            return index
+    return -1
+
+
+def scan_class_usage(class_id: int) -> list[dict]:
+    affected: list[dict] = []
+    for split in ("train", "val"):
+        label_dir = store.root / "labels" / split
+        if not label_dir.exists():
+            continue
+        for label_file in sorted(label_dir.glob("*.txt")):
+            try:
+                text = label_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            count = 0
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    if int(float(stripped.split()[0])) == class_id:
+                        count += 1
+                except (ValueError, IndexError):
+                    continue
+            if count:
+                affected.append({
+                    "image": f"{split}/{label_file.stem}.png",
+                    "boxes": count,
+                })
+    return affected
+
+
+def _strip_class_lines(text: str, removed_index: int) -> str:
+    pattern = re.compile(rf"^{removed_index}(\s|$)", re.MULTILINE)
+    lines = [line for line in text.splitlines() if not pattern.match(line)]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _renumber_label_lines(text: str, removed_index: int) -> str:
+    def _shift(match: re.Match) -> str:
+        idx = int(match.group(1))
+        if idx <= removed_index:
+            return match.group(0)
+        return f"{idx - 1}{match.group(2)}"
+
+    return re.sub(r"^(\d+)(\s)", _shift, text, flags=re.MULTILINE)
+
+
+def delete_class_with_renumber(label: str, force: bool) -> dict:
+    classes = store.load_classes()
+    index = find_class_index(classes, label)
+    if index == -1:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "class_not_found", "label": label},
+        )
+    item = classes[index]
+    if int(item.get("id", 0)) <= LEGACY_MAX_ID or item.get("label") in LEGACY_MAP.get(item.get("rarity", ""), {}):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "legacy_class", "label": label, "message": "legacy 类不可删除"},
+        )
+
+    affected = scan_class_usage(index)
+    total_boxes = sum(entry["boxes"] for entry in affected)
+    if affected and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "class_in_use",
+                "label": label,
+                "affected": affected,
+                "total_boxes": total_boxes,
+            },
+        )
+
+    renumbered_files = 0
+    for split in ("train", "val"):
+        label_dir = store.root / "labels" / split
+        if not label_dir.exists():
+            continue
+        for label_file in label_dir.glob("*.txt"):
+            try:
+                text = label_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            stripped = _strip_class_lines(text, index)
+            new_text = _renumber_label_lines(stripped, index)
+            if new_text != text:
+                label_file.write_text(new_text, encoding="utf-8")
+                renumbered_files += 1
+
+    classes.pop(index)
+    store.save_classes(classes)
+    export_dataset()
+
+    return {
+        "label": label,
+        "removed": True,
+        "affected_images": len(affected),
+        "stripped_boxes": total_boxes,
+        "renumbered_files": renumbered_files,
+        "exported": True,
+        "classes": classes,
+    }
 
 
 def patch_predict_model_file() -> Path | None:
@@ -524,10 +649,11 @@ def patch_predict_model_file() -> Path | None:
     return None
 
 
-def get_patch_model():
+def get_patch_model(model_path: Path | None = None):
     global _patch_model, _patch_model_mtime, _patch_model_path
 
-    model_path = patch_predict_model_file()
+    if model_path is None:
+        model_path = patch_predict_model_file()
     if model_path is None:
         raise HTTPException(
             status_code=404,
@@ -575,14 +701,20 @@ def patch_class_item(class_index: int, classes: list[dict], names: dict | list |
     }
 
 
-def detect_patch_image(path: Path, conf_threshold: float, iou_threshold: float) -> list[dict]:
+def detect_patch_image(
+    path: Path,
+    conf_threshold: float,
+    iou_threshold: float,
+    patch_model_path: Path | None = None,
+    patch_labels_path: Path | None = None,
+) -> list[dict]:
     image_bgr = cv2.imread(str(path))
     if image_bgr is None:
         raise HTTPException(status_code=400, detail=f"Cannot read image: {path.name}")
 
-    classes = load_patch_classes()
+    classes = load_patch_classes(patch_labels_path)
     with _patch_lock:
-        model = get_patch_model()
+        model = get_patch_model(patch_model_path)
         try:
             results = model.predict(
                 source=image_bgr,
@@ -630,17 +762,24 @@ def detect_patch_image(path: Path, conf_threshold: float, iou_threshold: float) 
     return detections
 
 
-def detect_reference_image(path: Path, source: str, conf_threshold: float, iou_threshold: float) -> tuple[list[dict], list[str]]:
+def detect_reference_image(
+    path: Path,
+    source: str,
+    conf_threshold: float,
+    iou_threshold: float,
+    patch_model_path: Path | None = None,
+    patch_labels_path: Path | None = None,
+) -> tuple[list[dict], list[str]]:
     if source == "legacy":
         return detect_legacy_image(path, conf_threshold, iou_threshold), []
     if source == "patch":
-        return detect_patch_image(path, conf_threshold, iou_threshold), []
+        return detect_patch_image(path, conf_threshold, iou_threshold, patch_model_path, patch_labels_path), []
     if source == "both":
         detections = []
         warnings = []
         for label, detector in (
-            ("OAS 原模型", detect_legacy_image),
-            ("训练模型", detect_patch_image),
+            ("OAS 原模型", lambda p, c, i: detect_legacy_image(p, c, i)),
+            ("训练模型", lambda p, c, i: detect_patch_image(p, c, i, patch_model_path, patch_labels_path)),
         ):
             try:
                 detections.extend(detector(path, conf_threshold, iou_threshold))
@@ -865,6 +1004,15 @@ def archive_current_model(reason: str = "before_train") -> dict | None:
     }
 
 
+def legacy_classes_for_picker() -> list[dict]:
+    items: list[dict] = []
+    for rarity in ("buff", "n", "g", "r", "sr", "ssr", "sp"):
+        mapping = LEGACY_MAP.get(rarity) or {}
+        for label, name in mapping.items():
+            items.append({"id": legacy_id_for_label(label), "label": label, "name": name, "rarity": rarity})
+    return items
+
+
 def latest_model_archive() -> dict | None:
     if not MODEL_VERSIONS_DIR.exists():
         return None
@@ -887,6 +1035,67 @@ def latest_model_archive() -> dict | None:
     }
 
 
+def list_model_archives() -> list[dict]:
+    if not MODEL_VERSIONS_DIR.exists():
+        return []
+    archives: list[dict] = []
+    for path in sorted(MODEL_VERSIONS_DIR.iterdir(), key=lambda p: p.name):
+        if not path.is_dir():
+            continue
+        manifest_path = path / "manifest.json"
+        created_at = ""
+        if manifest_path.exists():
+            try:
+                with manifest_path.open("r", encoding="utf-8") as f:
+                    created_at = (json.load(f) or {}).get("created_at", "")
+            except Exception:
+                created_at = ""
+        best_pt = path / "best.pt"
+        onnx = path / "hya_patch_fp32.onnx"
+        labels = path / "hya_patch_labels.json"
+        archives.append({
+            "id": path.name,
+            "path": str(path),
+            "created_at": created_at,
+            "best_pt_path": str(best_pt) if best_pt.exists() else None,
+            "onnx_path": str(onnx) if onnx.exists() else None,
+            "labels_path": str(labels) if labels.exists() else None,
+        })
+    return archives
+
+
+def _resolve_patch_paths(
+    model_path_str: str | None,
+    labels_path_str: str | None,
+) -> tuple[Path | None, Path | None]:
+    if not model_path_str and not labels_path_str:
+        return None, None
+    model_path = _resolve_local_model_file(model_path_str, "模型文件", {".pt", ".onnx"}) if model_path_str else None
+    labels_path = _resolve_local_model_file(labels_path_str, "标签文件", {".json"}) if labels_path_str else None
+    if model_path and not labels_path:
+        candidate = model_path.parent / "hya_patch_labels.json"
+        if candidate.exists():
+            labels_path = candidate
+    return model_path, labels_path
+
+
+def _resolve_local_model_file(path_str: str, label: str, suffixes: set[str]) -> Path:
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        raise HTTPException(status_code=400, detail=f"{label}不存在: {path}")
+    resolved = path.resolve()
+    allowed_roots = [MODELS_DIR.resolve(), TRAIN_RUNS_DIR.resolve()]
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label}必须位于工作台 models 或 runs 目录内: {resolved}",
+        )
+    if resolved.suffix.lower() not in suffixes:
+        suffix_text = "、".join(sorted(suffixes))
+        raise HTTPException(status_code=400, detail=f"{label}类型不支持: {resolved.name}，只允许 {suffix_text}")
+    return resolved
+
+
 def patch_model_status() -> dict:
     predict_model = patch_predict_model_file()
     return {
@@ -899,6 +1108,7 @@ def patch_model_status() -> dict:
         "predict_path": str(predict_model) if predict_model else None,
         "predict_exists": predict_model is not None,
         "latest_archive": latest_model_archive(),
+        "archives": list_model_archives(),
     }
 
 
@@ -1101,19 +1311,177 @@ def empty_torch_info() -> dict:
     }
 
 
-def check_training_environment(path: str) -> dict:
-    modules = ["ultralytics", "torch", "onnx"]
+def environment_cache_key(path: str) -> str:
     try:
-        cache_key = str(Path(path).resolve())
+        return str(Path(path).resolve())
     except OSError:
-        cache_key = path
-    cached = _environment_cache.get(cache_key)
-    if cached and time.time() - cached[0] < ENV_CHECK_CACHE_SECONDS:
-        return cached[1]
+        return path
+
+
+def _safe_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def environment_cache_fingerprint(path: str, modules: list[str]) -> str:
+    try:
+        python_path = Path(path).resolve()
+    except OSError:
+        python_path = Path(path)
+    parts = [
+        str(python_path),
+        str(_safe_mtime_ns(python_path)),
+        str(_safe_mtime_ns(VENV_TRAIN_PYTHON)),
+        str(_safe_mtime_ns(OAS_TRAIN_PYTHON)),
+    ]
+    site_roots = []
+    for root in (VENV_SITE_PACKAGES, OAS_ROOT / "toolkit" / "Lib" / "site-packages"):
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            resolved_root = root
+        if resolved_root not in site_roots:
+            site_roots.append(resolved_root)
+    for root in site_roots:
+        parts.append(f"site:{root}:{_safe_mtime_ns(root)}")
+        for module in modules:
+            candidates = [root / module]
+            try:
+                candidates.extend(root.glob(f"{module}*.dist-info"))
+                candidates.extend(root.glob(f"{module.replace('_', '-')}*.dist-info"))
+            except OSError:
+                pass
+            seen: set[Path] = set()
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    resolved = candidate
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                parts.append(f"{resolved}:{_safe_mtime_ns(resolved)}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _load_environment_cache_file() -> dict:
+    if not ENV_CHECK_CACHE_FILE.exists():
+        return {"version": 1, "records": {}}
+    try:
+        with ENV_CHECK_CACHE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {"version": 1, "records": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "records": {}}
+    records = data.get("records")
+    if not isinstance(records, dict):
+        data["records"] = {}
+    return data
+
+
+def load_environment_file_cache(cache_key: str, fingerprint: str) -> dict | None:
+    data = _load_environment_cache_file()
+    record = data.get("records", {}).get(cache_key)
+    if not isinstance(record, dict):
+        return None
+    checked_at = float(record.get("checked_at") or 0)
+    if record.get("fingerprint") != fingerprint:
+        return None
+    if time.time() - checked_at > ENV_CHECK_FILE_CACHE_SECONDS:
+        return None
+    environment = record.get("environment")
+    if not isinstance(environment, dict):
+        return None
+    return mark_environment_cached(environment, "file")
+
+
+def save_environment_file_cache(cache_key: str, fingerprint: str, environment: dict):
+    TRAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    data = _load_environment_cache_file()
+    records = data.setdefault("records", {})
+    checked_at = float(environment.get("checked_at") or time.time())
+    clean_environment = dict(environment)
+    clean_environment["cached"] = False
+    clean_environment["cache_source"] = "fresh"
+    records[cache_key] = {
+        "fingerprint": fingerprint,
+        "checked_at": checked_at,
+        "environment": clean_environment,
+    }
+    tmp_path = ENV_CHECK_CACHE_FILE.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp_path.replace(ENV_CHECK_CACHE_FILE)
+
+
+def clear_environment_cache(path: str | None = None):
+    if path:
+        _environment_cache.pop(environment_cache_key(path), None)
+    else:
+        _environment_cache.clear()
+    try:
+        ENV_CHECK_CACHE_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def mark_environment_cached(environment: dict, source: str) -> dict:
+    data = dict(environment)
+    data["cached"] = True
+    data["cache_source"] = source
+    return data
+
+
+def pending_training_environment(path: str, reason: str) -> dict:
+    return {
+        "python": path,
+        "exists": executable_exists(path),
+        "ok": False,
+        "modules": {module: False for module in ["ultralytics", "torch", "onnx"]},
+        "torch": empty_torch_info(),
+        "gpu": {
+            "hardware": nvidia_gpus(),
+            "usable": False,
+            "reason": reason,
+        },
+        "error": reason,
+        "cached": False,
+        "cache_source": "pending",
+        "checked_at": time.time(),
+        "fingerprint": "",
+    }
+
+
+def check_training_environment(path: str, force: bool = False, cache_result: bool = True) -> dict:
+    modules = ["ultralytics", "torch", "onnx"]
+    cache_key = environment_cache_key(path)
+    fingerprint = environment_cache_fingerprint(path, modules)
+    if not force:
+        cached = _environment_cache.get(cache_key)
+        if cached and time.time() - cached[0] < ENV_CHECK_CACHE_SECONDS:
+            data = cached[1]
+            if data.get("fingerprint") == fingerprint:
+                return mark_environment_cached(data, "memory")
+        file_cached = load_environment_file_cache(cache_key, fingerprint)
+        if file_cached:
+            _environment_cache[cache_key] = (time.time(), file_cached)
+            return file_cached
 
     def finish(data: dict) -> dict:
-        _environment_cache[cache_key] = (time.time(), data)
-        return data
+        finished = dict(data)
+        finished["fingerprint"] = fingerprint
+        finished["cached"] = False
+        finished["cache_source"] = "fresh"
+        finished["checked_at"] = time.time()
+        if cache_result:
+            _environment_cache[cache_key] = (time.time(), finished)
+            save_environment_file_cache(cache_key, fingerprint, finished)
+        return finished
 
     hardware_gpus = nvidia_gpus()
     if not executable_exists(path):
@@ -1302,17 +1670,23 @@ def current_install_job() -> dict:
     }
 
 
-def training_status(path: str | None = None, device: str = "cpu") -> dict:
+def training_status(path: str | None = None, device: str = "cpu", refresh_env: bool = False) -> dict:
     python_path = clean_python_path(path)
+    job = current_train_job()
+    install = current_install_job()
+    if install["running"]:
+        environment = pending_training_environment(python_path, "依赖安装中，安装完成后会重新检查")
+    else:
+        environment = check_training_environment(python_path, force=refresh_env)
     return {
         "dataset": dataset_training_stats(),
-        "environment": check_training_environment(python_path),
+        "environment": environment,
         "default_python": str(DEFAULT_TRAIN_PYTHON),
         "oas_python": str(OAS_TRAIN_PYTHON),
         "venv_python": str(VENV_TRAIN_PYTHON),
         "commands": training_commands(python_path, device),
-        "job": current_train_job(),
-        "install": current_install_job(),
+        "job": job,
+        "install": install,
         "log": train_log_tail(),
         "install_log": install_log_tail(),
         "model": patch_model_status(),
@@ -1447,6 +1821,7 @@ def state():
     return {
         "root": str(store.root),
         "classes": classes,
+        "legacy_classes": legacy_classes_for_picker(),
         "frames": {
             "train": len(list((store.root / "images" / "train").glob("*.png"))),
             "val": len(list((store.root / "images" / "val").glob("*.png"))),
@@ -1533,15 +1908,19 @@ def image(image: str = Query(...)):
 @app.post("/api/legacy-detect")
 def legacy_detect(payload: LegacyDetectIn):
     path, _split = image_path(payload.image)
+    model_path, labels_path = _resolve_patch_paths(payload.patch_model_path, payload.patch_labels_path)
     detections, warnings = detect_reference_image(
         path,
         payload.source,
         payload.conf_threshold,
         payload.iou_threshold,
+        model_path,
+        labels_path,
     )
     return {
         "image": payload.image,
         "source": payload.source,
+        "patch_model_path": str(model_path) if model_path else None,
         "detections": detections,
         "warnings": warnings,
     }
@@ -1560,6 +1939,7 @@ def legacy_detect_batch(payload: LegacyBatchDetectIn):
         files = sorted((store.root / "images" / payload.split).glob("*.png"), key=lambda p: p.stat().st_mtime)
         image_items = [(f"{payload.split}/{path.name}", path) for path in files]
 
+    model_path, labels_path = _resolve_patch_paths(payload.patch_model_path, payload.patch_labels_path)
     predictions = {}
     warnings = []
     total = 0
@@ -1569,6 +1949,8 @@ def legacy_detect_batch(payload: LegacyBatchDetectIn):
             payload.source,
             payload.conf_threshold,
             payload.iou_threshold,
+            model_path,
+            labels_path,
         )
         predictions[image_rel] = detections
         warnings.extend(f"{image_rel}: {warning}" for warning in image_warnings)
@@ -1576,6 +1958,7 @@ def legacy_detect_batch(payload: LegacyBatchDetectIn):
     return {
         "split": payload.split,
         "source": payload.source,
+        "patch_model_path": str(model_path) if model_path else None,
         "images": len(image_items),
         "detections": total,
         "predictions": predictions,
@@ -1600,6 +1983,12 @@ def add_class(payload: ClassIn):
     classes.append(item)
     store.save_classes(classes)
     return {"classes": classes, "added": item}
+
+
+@app.post("/api/classes/delete")
+def delete_class(payload: DeleteClassIn):
+    result = delete_class_with_renumber(payload.label, payload.force)
+    return result
 
 
 def make_oas_device(config_name: str):
@@ -1746,8 +2135,12 @@ def export_dataset():
 
 
 @app.get("/api/train/status")
-def train_status(python: str | None = Query(None), device: str = Query("cpu")):
-    return training_status(python, device)
+def train_status(
+    python: str | None = Query(None),
+    device: str = Query("cpu"),
+    refresh_env: bool = Query(False),
+):
+    return training_status(python, device, refresh_env)
 
 
 @app.post("/api/train/install-deps")
@@ -1764,6 +2157,7 @@ def train_install_deps(payload: TrainDepsIn):
     if not executable_exists(python_path):
         raise HTTPException(status_code=400, detail=f"Python 不存在: {python_path}")
 
+    clear_environment_cache(python_path)
     TRAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     if payload.mode == "cuda":
         _install_command = [

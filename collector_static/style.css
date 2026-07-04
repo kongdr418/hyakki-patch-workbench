@@ -94,6 +94,24 @@ input, select, button {
   font: inherit;
 }
 
+#deleteClassBtn {
+  margin-top: 6px;
+}
+
+option.class-legacy {
+  color: var(--muted);
+}
+
+option.class-custom {
+  font-weight: 600;
+}
+
+.model-hint {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 input, select {
   padding: 0 9px;
 }
