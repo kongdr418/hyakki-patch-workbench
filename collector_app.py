@@ -487,8 +487,8 @@ def pick_directory(title: str, initial: str | None = None) -> dict:
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$title = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))
-$initial = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[1]))
+$title = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("__TITLE_B64__"))
+$initial = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("__INITIAL_B64__"))
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.Description = $title
 $dialog.ShowNewFolderButton = $true
@@ -512,9 +512,11 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dialog.SelectedPath
 }
 '''
+        script = script.replace("__TITLE_B64__", title_b64).replace("__INITIAL_B64__", initial_b64)
+        encoded_command = base64.b64encode(script.encode("utf-16le")).decode("ascii")
         try:
             result = subprocess.run(
-                [powershell_path, "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, title_b64, initial_b64],
+                [powershell_path, "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_command],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
