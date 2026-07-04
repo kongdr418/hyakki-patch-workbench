@@ -1013,6 +1013,44 @@ def legacy_classes_for_picker() -> list[dict]:
     return items
 
 
+def class_usage_stats(classes: list[dict]) -> dict[str, dict]:
+    usage = {
+        item["label"]: {"boxes": 0, "images": 0}
+        for item in classes
+        if item.get("label")
+    }
+    if not classes:
+        return usage
+    index_to_label = {index: item["label"] for index, item in enumerate(classes)}
+    for split in ("train", "val"):
+        label_dir = store.root / "labels" / split
+        if not label_dir.exists():
+            continue
+        for label_file in label_dir.glob("*.txt"):
+            labels_in_image: set[str] = set()
+            try:
+                lines = label_file.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                fields = line.split()
+                if not fields:
+                    continue
+                try:
+                    class_index = int(float(fields[0]))
+                except ValueError:
+                    continue
+                label = index_to_label.get(class_index)
+                if not label:
+                    continue
+                entry = usage.setdefault(label, {"boxes": 0, "images": 0})
+                entry["boxes"] += 1
+                labels_in_image.add(label)
+            for label in labels_in_image:
+                usage.setdefault(label, {"boxes": 0, "images": 0})["images"] += 1
+    return usage
+
+
 def latest_model_archive() -> dict | None:
     if not MODEL_VERSIONS_DIR.exists():
         return None
@@ -1822,6 +1860,7 @@ def state():
         "root": str(store.root),
         "classes": classes,
         "legacy_classes": legacy_classes_for_picker(),
+        "class_usage": class_usage_stats(classes),
         "frames": {
             "train": len(list((store.root / "images" / "train").glob("*.png"))),
             "val": len(list((store.root / "images" / "val").glob("*.png"))),

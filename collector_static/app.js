@@ -2,6 +2,7 @@ const state = {
   root: '',
   classes: [],
   legacyClasses: [],
+  classUsage: {},
   split: 'train',
   frames: [],
   index: -1,
@@ -192,13 +193,50 @@ function sortedClasses() {
   return sortClassList(state.classes);
 }
 
+function classUsageForLabel(label) {
+  return state.classUsage?.[label] || {boxes: 0, images: 0};
+}
+
+function classHasData(label) {
+  return (classUsageForLabel(label).boxes || 0) > 0;
+}
+
+function withClassUsage(item) {
+  const usage = classUsageForLabel(item.label);
+  return {
+    ...item,
+    usage,
+    hasData: (usage.boxes || 0) > 0,
+  };
+}
+
 function pickerClasses() {
   const legacyLabels = new Set((state.legacyClasses || []).map(item => item.label));
-  const legacyItems = (state.legacyClasses || []).map(item => ({ ...item, isLegacy: true }));
+  const legacyItems = (state.legacyClasses || []).map(item => withClassUsage({ ...item, isLegacy: true }));
   const customItems = (state.classes || [])
     .filter(item => !legacyLabels.has(item.label))
-    .map(item => ({ ...item, isLegacy: false }));
+    .map(item => withClassUsage({ ...item, isLegacy: false }));
   return [...legacyItems, ...customItems];
+}
+
+function adjustClassUsage(oldBoxes = [], newBoxes = []) {
+  const ensure = (label) => {
+    if (!state.classUsage[label]) state.classUsage[label] = {boxes: 0, images: 0};
+    return state.classUsage[label];
+  };
+  const oldCounts = {};
+  const newCounts = {};
+  for (const box of oldBoxes || []) oldCounts[box.label] = (oldCounts[box.label] || 0) + 1;
+  for (const box of newBoxes || []) newCounts[box.label] = (newCounts[box.label] || 0) + 1;
+  const labels = new Set([...Object.keys(oldCounts), ...Object.keys(newCounts)]);
+  for (const label of labels) {
+    const entry = ensure(label);
+    const oldCount = oldCounts[label] || 0;
+    const newCount = newCounts[label] || 0;
+    entry.boxes = Math.max(0, (entry.boxes || 0) - oldCount + newCount);
+    if (oldCount > 0 && newCount === 0) entry.images = Math.max(0, (entry.images || 0) - 1);
+    if (oldCount === 0 && newCount > 0) entry.images = (entry.images || 0) + 1;
+  }
 }
 
 function appendClassOptions(select, classes) {
@@ -215,14 +253,16 @@ function appendClassOptions(select, classes) {
     const option = document.createElement('option');
     option.value = item.label;
     option.textContent = `${item.label} · ${item.name}`;
-    if (item.isLegacy === true) {
-      option.classList.add('class-legacy');
-      option.title = 'OAS 原模型内置标签';
+    if (item.hasData) {
+      option.classList.add('class-has-data');
+    } else {
+      option.classList.add('class-empty-data');
     }
-    if (item.isLegacy === false) {
-      option.classList.add('class-custom');
-      option.title = '训练集自定义标签';
-    }
+    const usageText = item.hasData
+      ? `已有 ${item.usage.boxes || 0} 个标注框 / ${item.usage.images || 0} 张图`
+      : '暂无标注数据';
+    const sourceText = item.isLegacy ? 'OAS 内置标签' : '自定义标签';
+    option.title = `${usageText} · ${sourceText}`;
     groupElement.appendChild(option);
   }
 }
@@ -291,6 +331,7 @@ async function loadState() {
   state.root = data.root;
   state.classes = data.classes;
   state.legacyClasses = data.legacy_classes || [];
+  state.classUsage = data.class_usage || {};
   state.patchModel = data.patch_model || {exists: false, path: '', pt_exists: false, pt_path: ''};
   state.legacyModel = data.legacy_model || {available: true, error: ''};
   state.oas = data.oas || {configs: [], default_config: '', root: '', config_dir: ''};
@@ -773,11 +814,13 @@ async function saveImageAnnotations(image, boxes) {
     method: 'POST',
     body: JSON.stringify({image, boxes})
   });
+  const frame = state.frames.find(item => item.image === image);
+  const oldBoxes = frame ? frame.boxes.map(box => ({...box})) : [];
+  adjustClassUsage(oldBoxes, data.boxes || []);
   if (data.classes) {
     state.classes = data.classes;
-    renderClasses();
   }
-  const frame = state.frames.find(item => item.image === image);
+  renderClasses();
   if (frame) {
     frame.boxes = data.boxes;
     frame.trained = false;
@@ -1227,10 +1270,15 @@ async function deleteSelectedFrames() {
   if (!window.confirm(`确认删除 ${images.length} 张图片及其标注？\n${preview}${more}`)) {
     return;
   }
+  const deletedFrameBoxes = state.frames
+    .filter(frame => images.includes(frame.image))
+    .flatMap(frame => frame.boxes || []);
   const data = await api('/api/frames/delete', {
     method: 'POST',
     body: JSON.stringify({images})
   });
+  adjustClassUsage(deletedFrameBoxes, []);
+  renderClasses();
   state.selectedImages.clear();
   const deletedImages = new Set(data.deleted.map(item => item.image));
   if (state.index >= 0 && deletedImages.has(state.frames[state.index]?.image)) {

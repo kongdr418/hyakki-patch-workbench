@@ -98,11 +98,12 @@ input, select, button {
   margin-top: 6px;
 }
 
-option.class-legacy {
+option.class-empty-data {
   color: var(--muted);
 }
 
-option.class-custom {
+option.class-has-data {
+  color: var(--ink);
   font-weight: 600;
 }
 
