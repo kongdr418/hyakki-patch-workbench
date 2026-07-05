@@ -431,6 +431,19 @@ canvas {
   margin-top: 10px;
 }
 
+.train-balance {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(150px, 1fr);
+  gap: 8px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.train-balance button {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
 .train-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -499,6 +512,7 @@ canvas {
 
   .train-python-field,
   .train-model-field,
+  .train-balance,
   .train-actions .check {
     grid-column: 1 / -1;
   }

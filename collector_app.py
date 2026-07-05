@@ -5,6 +5,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -117,6 +119,7 @@ MODELS_DIR = HYAKKI_DIR / "models"
 MODEL_VERSIONS_DIR = MODELS_DIR / "versions"
 PATCH_LABELS_FILE = MODELS_DIR / "hya_patch_labels.json"
 PATCH_MODEL_FILE = MODELS_DIR / "hya_patch_fp32.onnx"
+PATCH_STABLE_PT_MODEL_FILE = MODELS_DIR / "hya_patch_best.pt"
 TRAIN_SCRIPT = HYAKKI_DIR / "train_patch_model.py"
 TRAIN_RUNS_DIR = HYAKKI_DIR / "runs"
 PATCH_PT_MODEL_FILE = TRAIN_RUNS_DIR / "hya_patch" / "weights" / "best.pt"
@@ -317,6 +320,12 @@ class AnnotationIn(BaseModel):
 class MoveFramesIn(BaseModel):
     images: list[str] = Field(min_length=1)
     target: Literal["train", "val"]
+
+
+class BalanceValIn(BaseModel):
+    target_ratio: float = Field(default=0.1, ge=0.01, le=0.5)
+    min_train_boxes_per_class: int = Field(default=1, ge=0, le=20)
+    dry_run: bool = False
 
 
 class DeleteFramesIn(BaseModel):
@@ -784,10 +793,20 @@ def delete_class_with_renumber(label: str, force: bool) -> dict:
 
 
 def patch_predict_model_file() -> Path | None:
-    if PATCH_PT_MODEL_FILE.exists():
-        return PATCH_PT_MODEL_FILE
+    if PATCH_STABLE_PT_MODEL_FILE.exists():
+        return PATCH_STABLE_PT_MODEL_FILE
     if PATCH_MODEL_FILE.exists():
         return PATCH_MODEL_FILE
+    if PATCH_PT_MODEL_FILE.exists():
+        return PATCH_PT_MODEL_FILE
+    return None
+
+
+def patch_train_base_model_file() -> Path | None:
+    if PATCH_STABLE_PT_MODEL_FILE.exists():
+        return PATCH_STABLE_PT_MODEL_FILE
+    if PATCH_PT_MODEL_FILE.exists():
+        return PATCH_PT_MODEL_FILE
     return None
 
 
@@ -1034,6 +1053,22 @@ def sample_training_state(
     }
 
 
+def label_class_counts(label_file: Path) -> Counter[int]:
+    counts: Counter[int] = Counter()
+    if not label_file.exists():
+        return counts
+    for line in label_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        try:
+            class_id = int(float(fields[0]))
+        except ValueError:
+            continue
+        counts[class_id] += 1
+    return counts
+
+
 def labeled_image_items(split: str, manifest: dict | None = None) -> list[dict]:
     image_dir = store.root / "images" / split
     label_dir = store.root / "labels" / split
@@ -1048,11 +1083,13 @@ def labeled_image_items(split: str, manifest: dict | None = None) -> list[dict]:
             continue
         rel = f"{split}/{image_file.name}"
         train_state = sample_training_state(rel, image_file, label_file, manifest)
+        class_counts = label_class_counts(label_file)
         items.append({
             "image": rel,
             "path": image_file,
             "label_path": label_file,
             "boxes": len(lines),
+            "class_counts": dict(class_counts),
             "digest": train_state["digest"],
             "trained": train_state["trained"],
         })
@@ -1107,11 +1144,13 @@ def prepare_training_dataset(mode: str, run_id: str) -> dict:
 
 
 def archive_current_model(reason: str = "before_train") -> dict | None:
+    stable_best_pt = PATCH_STABLE_PT_MODEL_FILE if PATCH_STABLE_PT_MODEL_FILE.exists() else PATCH_PT_MODEL_FILE
     artifacts = [
-        (PATCH_PT_MODEL_FILE, "best.pt"),
+        (stable_best_pt, "best.pt"),
         (PATCH_PT_MODEL_FILE.with_name("last.pt"), "last.pt"),
         (PATCH_PT_MODEL_FILE.with_suffix(".onnx"), "best.onnx"),
         (PATCH_MODEL_FILE, PATCH_MODEL_FILE.name),
+        (PATCH_STABLE_PT_MODEL_FILE, PATCH_STABLE_PT_MODEL_FILE.name),
         (PATCH_LABELS_FILE, PATCH_LABELS_FILE.name),
         (store.root / "data.yaml", "data.yaml"),
         (store.classes_path, "classes.json"),
@@ -1278,13 +1317,19 @@ def _resolve_local_model_file(path_str: str, label: str, suffixes: set[str]) -> 
 
 def patch_model_status() -> dict:
     predict_model = patch_predict_model_file()
+    train_base_model = patch_train_base_model_file()
     return {
         "path": str(PATCH_MODEL_FILE),
         "exists": PATCH_MODEL_FILE.exists(),
         "mtime": PATCH_MODEL_FILE.stat().st_mtime if PATCH_MODEL_FILE.exists() else None,
-        "pt_path": str(PATCH_PT_MODEL_FILE),
-        "pt_exists": PATCH_PT_MODEL_FILE.exists(),
-        "pt_mtime": PATCH_PT_MODEL_FILE.stat().st_mtime if PATCH_PT_MODEL_FILE.exists() else None,
+        "pt_path": str(train_base_model or PATCH_STABLE_PT_MODEL_FILE),
+        "pt_exists": train_base_model is not None,
+        "pt_mtime": train_base_model.stat().st_mtime if train_base_model else None,
+        "stable_pt_path": str(PATCH_STABLE_PT_MODEL_FILE),
+        "stable_pt_exists": PATCH_STABLE_PT_MODEL_FILE.exists(),
+        "run_pt_path": str(PATCH_PT_MODEL_FILE),
+        "run_pt_exists": PATCH_PT_MODEL_FILE.exists(),
+        "run_pt_mtime": PATCH_PT_MODEL_FILE.stat().st_mtime if PATCH_PT_MODEL_FILE.exists() else None,
         "predict_path": str(predict_model) if predict_model else None,
         "predict_exists": predict_model is not None,
         "latest_archive": latest_model_archive(),
@@ -1351,6 +1396,8 @@ def dataset_training_stats() -> dict:
     classes = store.load_classes()
     train = split_stats("train")
     val = split_stats("val")
+    total_labeled_images = train["labeled_images"] + val["labeled_images"]
+    val_image_ratio = val["labeled_images"] / total_labeled_images if total_labeled_images else 0
     warnings = []
     if not classes:
         warnings.append("还没有导出任何式神标签")
@@ -1362,6 +1409,8 @@ def dataset_training_stats() -> dict:
         "classes": classes,
         "train": train,
         "val": val,
+        "total_labeled_images": total_labeled_images,
+        "val_image_ratio": val_image_ratio,
         "warnings": warnings,
         "ready": bool(classes) and train["boxes"] >= 20 and val["boxes"] >= 5,
     }
@@ -1788,6 +1837,10 @@ def training_commands(python_path: str, device: str = "cpu") -> dict:
         "--device", device,
         "--workers", "4",
         "--cache", "ram",
+        "--project", str(TRAIN_RUNS_DIR),
+        "--name", "hya_patch",
+        "--output", str(PATCH_MODEL_FILE),
+        "--pt-output", str(PATCH_STABLE_PT_MODEL_FILE),
     ]
     return {
         "prepare": prepare,
@@ -1976,6 +2029,137 @@ def move_frame_item(image_rel: str, target: str) -> dict | None:
     }
 
 
+def item_class_counts(item: dict) -> Counter[int]:
+    counts: Counter[int] = Counter()
+    for class_id, count in (item.get("class_counts") or {}).items():
+        try:
+            cid = int(class_id)
+            value = int(count)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            counts[cid] += value
+    return counts
+
+
+def sum_item_class_counts(items: list[dict]) -> Counter[int]:
+    counts: Counter[int] = Counter()
+    for item in items:
+        counts.update(item_class_counts(item))
+    return counts
+
+
+def move_collision_reason(item: dict, target: str) -> str | None:
+    source_image = item["path"]
+    source_label = item["label_path"]
+    target_image = store.root / "images" / target / source_image.name
+    target_label = store.root / "labels" / target / f"{source_image.stem}.txt"
+    if target_image.exists():
+        return f"目标已有图片: {target}/{source_image.name}"
+    if source_label.exists() and target_label.exists():
+        return f"目标已有标注: {target}/{target_label.name}"
+    return None
+
+
+def class_labels_for_counts(counts: Counter[int], class_by_id: dict[int, str]) -> list[str]:
+    return [class_by_id.get(class_id, str(class_id)) for class_id in sorted(counts)]
+
+
+def balance_preview_item(item: dict, class_by_id: dict[int, str]) -> dict:
+    counts = item_class_counts(item)
+    return {
+        "from": item["image"],
+        "to": f"val/{item['path'].name}",
+        "boxes": item["boxes"],
+        "labels": class_labels_for_counts(counts, class_by_id),
+    }
+
+
+def val_balance_score(
+    item: dict,
+    val_counts: Counter[int],
+    total_counts: Counter[int],
+    target_ratio: float,
+) -> tuple[int, int, int, int]:
+    counts = item_class_counts(item)
+    deficit_score = 0
+    missing_score = 0
+    for class_id, count in counts.items():
+        desired_boxes = max(1, math.ceil(total_counts[class_id] * target_ratio))
+        deficit = max(0, desired_boxes - val_counts[class_id])
+        deficit_score += min(count, deficit)
+        if val_counts[class_id] <= 0:
+            missing_score += 1
+    stable = int(hashlib.sha1(item["image"].encode("utf-8")).hexdigest()[:8], 16)
+    return deficit_score, missing_score, min(int(item.get("boxes") or 0), 20), -stable
+
+
+def select_val_balance_items(
+    train_items: list[dict],
+    val_items: list[dict],
+    target_ratio: float,
+    min_train_boxes_per_class: int,
+) -> dict:
+    total_labeled = len(train_items) + len(val_items)
+    target_val_images = math.ceil(total_labeled * target_ratio) if total_labeled else 0
+    target_val_images = min(total_labeled, max(1 if total_labeled else 0, target_val_images))
+    needed = max(0, target_val_images - len(val_items))
+    max_move = min(needed, max(0, len(train_items) - 1))
+
+    train_counts = sum_item_class_counts(train_items)
+    val_counts_before = sum_item_class_counts(val_items)
+    val_counts = Counter(val_counts_before)
+    total_counts = train_counts + val_counts
+    total_classes = {class_id for class_id, count in total_counts.items() if count > 0}
+
+    skipped = []
+    candidates = []
+    for item in train_items:
+        reason = move_collision_reason(item, "val")
+        if reason:
+            skipped.append({"image": item["image"], "reason": reason})
+        else:
+            candidates.append(item)
+
+    selected = []
+    remaining = list(candidates)
+    for _index in range(max_move):
+        best = None
+        best_score = None
+        for item in remaining:
+            counts = item_class_counts(item)
+            if not counts:
+                continue
+            if any(
+                train_counts[class_id] - count < min_train_boxes_per_class
+                for class_id, count in counts.items()
+            ):
+                continue
+            score = val_balance_score(item, val_counts, total_counts, target_ratio)
+            if best is None or score > best_score:
+                best = item
+                best_score = score
+        if best is None:
+            break
+        remaining.remove(best)
+        selected.append(best)
+        counts = item_class_counts(best)
+        val_counts.update(counts)
+        train_counts.subtract(counts)
+
+    return {
+        "selected": selected,
+        "skipped": skipped,
+        "target_val_images": target_val_images,
+        "current_val_images": len(val_items),
+        "final_val_images": len(val_items) + len(selected),
+        "total_labeled_images": total_labeled,
+        "class_coverage_before": sum(1 for class_id in total_classes if val_counts_before[class_id] > 0),
+        "class_coverage_after": sum(1 for class_id in total_classes if val_counts[class_id] > 0),
+        "total_classes_with_boxes": len(total_classes),
+    }
+
+
 def delete_frame_item(image_rel: str) -> dict:
     image_file, split = image_path(image_rel)
     label_file = store.root / "labels" / split / f"{image_file.stem}.txt"
@@ -2073,6 +2257,64 @@ def move_frames(payload: MoveFramesIn):
     return {
         "target": payload.target,
         "moved": moved,
+    }
+
+
+@app.post("/api/dataset/balance-val")
+def balance_val_dataset(payload: BalanceValIn):
+    if current_train_job()["running"]:
+        raise HTTPException(status_code=409, detail="训练运行中，不能移动验证集")
+    if current_install_job()["running"]:
+        raise HTTPException(status_code=409, detail="依赖安装中，不能移动验证集")
+
+    classes = store.load_classes()
+    class_by_id = {index: item["label"] for index, item in enumerate(classes)}
+    manifest = load_training_manifest()
+    train_items = labeled_image_items("train", manifest)
+    val_items = labeled_image_items("val", manifest)
+    plan = select_val_balance_items(
+        train_items,
+        val_items,
+        payload.target_ratio,
+        payload.min_train_boxes_per_class,
+    )
+    selected = plan["selected"]
+    preview = [balance_preview_item(item, class_by_id) for item in selected]
+
+    moved = preview
+    if not payload.dry_run and selected:
+        moved = []
+        manifest_changed = False
+        samples = manifest.setdefault("samples", {})
+        for item in selected:
+            preview_item = balance_preview_item(item, class_by_id)
+            moved_item = move_frame_item(item["image"], "val")
+            if moved_item is None:
+                continue
+            preview_item["from"] = moved_item["from"]
+            preview_item["to"] = moved_item["to"]
+            moved.append(preview_item)
+            record = samples.pop(moved_item["from"], None)
+            if record is not None:
+                samples[moved_item["to"]] = record
+                manifest_changed = True
+        if manifest_changed:
+            save_training_manifest(manifest)
+
+    return {
+        "dry_run": payload.dry_run,
+        "target_ratio": payload.target_ratio,
+        "min_train_boxes_per_class": payload.min_train_boxes_per_class,
+        "total_labeled_images": plan["total_labeled_images"],
+        "current_val_images": plan["current_val_images"],
+        "target_val_images": plan["target_val_images"],
+        "final_val_images": plan["current_val_images"] + len(moved),
+        "moved_count": len(moved),
+        "moved": moved,
+        "skipped": plan["skipped"],
+        "class_coverage_before": plan["class_coverage_before"],
+        "class_coverage_after": plan["class_coverage_after"],
+        "total_classes_with_boxes": plan["total_classes_with_boxes"],
     }
 
 
@@ -2438,10 +2680,11 @@ def train_start(payload: TrainStartIn):
     run_id = timestamp_id()
     base_model = payload.model.strip() if payload.model else "yolov8n.pt"
     if payload.mode == "incremental":
-        if not PATCH_PT_MODEL_FILE.exists():
-            raise HTTPException(status_code=400, detail=f"增量训练需要先有当前 best.pt: {PATCH_PT_MODEL_FILE}")
+        train_base_model = patch_train_base_model_file()
+        if train_base_model is None:
+            raise HTTPException(status_code=400, detail=f"增量训练需要先有当前 best.pt: {PATCH_STABLE_PT_MODEL_FILE}")
         if base_model == "yolov8n.pt":
-            base_model = str(PATCH_PT_MODEL_FILE)
+            base_model = str(train_base_model)
     prepared = prepare_training_dataset(payload.mode, run_id)
     train_items = prepared["train_items"]
     val_items = prepared["val_items"]
@@ -2462,6 +2705,7 @@ def train_start(payload: TrainStartIn):
         "--project", str(TRAIN_RUNS_DIR),
         "--name", payload.name,
         "--output", str(PATCH_MODEL_FILE),
+        "--pt-output", str(PATCH_STABLE_PT_MODEL_FILE),
     ]
     _train_started_at = time.time()
     _train_plan = {

@@ -213,6 +213,14 @@
                 训练前备份模型
               </label>
             </div>
+            <div class="train-balance">
+              <label class="train-field train-number">
+                <span>验证集目标%</span>
+                <input id="valBalanceRatioInput" type="number" value="10" min="1" max="50" step="1">
+              </label>
+              <button id="balanceValBtn" type="button">自动补验证集</button>
+            </div>
+            <div class="field-note">从已标注 train 中挑图移动到 val，优先补齐验证集中缺少的标签。</div>
             <div class="train-actions">
               <button id="installDepsBtn" type="button">安装训练依赖</button>
               <button id="installCudaDepsBtn" type="button">安装显卡版 PyTorch</button>

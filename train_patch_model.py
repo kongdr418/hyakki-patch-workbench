@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--project", required=True)
     parser.add_argument("--name", default="hya_patch")
     parser.add_argument("--output", required=True, help="Destination ONNX path")
+    parser.add_argument("--pt-output", default=None, help="Destination stable best.pt path")
     return parser.parse_args()
 
 
@@ -64,6 +65,12 @@ def main():
         raise SystemExit(f"训练完成但没有找到 best.pt: {best_pt}")
 
     print(f"best: {best_pt}")
+    if args.pt_output:
+        pt_output_path = Path(args.pt_output)
+        pt_output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(best_pt, pt_output_path)
+        print(f"pt copied: {pt_output_path}")
+
     trained = YOLO(str(best_pt))
     export_result = trained.export(format="onnx", imgsz=args.imgsz, opset=12)
     exported = Path(export_result)

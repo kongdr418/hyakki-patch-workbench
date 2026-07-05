@@ -995,12 +995,12 @@ function trainSettings() {
 
 function useCurrentBestModel() {
   if (!state.patchModel?.pt_exists || !state.patchModel?.pt_path) {
-    setStatus('还没有生成 best.pt，先完成一次训练后才能继续训练。');
+    setStatus('还没有生成稳定 best.pt，先完成一次训练后才能继续训练。');
     return;
   }
   $('trainModelInput').value = state.patchModel.pt_path;
   $('trainModeInput').value = 'incremental';
-  setStatus('已切换为当前 best.pt，训练方式设为“增量未训练”。');
+  setStatus('已切换为稳定 best.pt，训练方式设为“增量未训练”。');
 }
 
 function moduleText(modules) {
@@ -1142,7 +1142,7 @@ function renderTrainStatus(data) {
   const useBestBtn = $('useBestModelBtn');
   if (useBestBtn) {
     useBestBtn.disabled = !state.patchModel.pt_exists || job.running || install.running;
-    useBestBtn.title = state.patchModel.pt_exists ? state.patchModel.pt_path : '还没有训练生成 best.pt';
+    useBestBtn.title = state.patchModel.pt_exists ? state.patchModel.pt_path : '还没有训练生成稳定 best.pt';
   }
 
   const warnings = dataset.warnings.length
@@ -1156,10 +1156,15 @@ function renderTrainStatus(data) {
     ? '安装中'
     : (install.exit_code === null ? '未启动' : (install.exit_code === 0 ? '已完成' : `失败 ${install.exit_code}`));
   const modelText = data.model.exists ? '已生成' : '未生成';
-  const ptText = data.model.pt_exists ? 'best.pt 可用' : 'best.pt 未生成';
+  const ptText = data.model.pt_exists ? '稳定 best.pt 可用' : '稳定 best.pt 未生成';
   const archiveText = data.model.latest_archive
     ? `最近备份：${escapeHtml(data.model.latest_archive.id)}`
     : '最近备份：无';
+  const totalLabeledImages = Number(dataset.total_labeled_images || ((dataset.train?.labeled_images || 0) + (dataset.val?.labeled_images || 0)));
+  const valImageRatio = totalLabeledImages ? Number(dataset.val_image_ratio || 0) : 0;
+  const valRatioText = totalLabeledImages
+    ? `验证集比例：${dataset.val.labeled_images}/${totalLabeledImages} 张 (${(valImageRatio * 100).toFixed(1)}%，建议 8%-12%)`
+    : '验证集比例：暂无已标注图片';
   const envText = env.ok ? '可训练' : '缺依赖';
   const envCacheText = env.cached
     ? ` · 缓存:${env.cache_source === 'file' ? '本地' : '内存'}`
@@ -1190,6 +1195,7 @@ function renderTrainStatus(data) {
     <div class="train-line">${escapeHtml(gpuText(env))}</div>
     <div class="train-line">安装：${installText} · 任务：${jobText} · 模型：${modelText} · ${ptText}</div>
     <div class="train-line">${archiveText}</div>
+    <div class="train-line">${valRatioText}</div>
     ${envError}
     ${gpuWarning}
     ${warnings}
@@ -1206,6 +1212,9 @@ function renderTrainStatus(data) {
   $('installCudaDepsBtn').disabled = job.running || install.running || !env.exists || !((env.gpu || {}).hardware || []).length || (env.gpu || {}).usable;
   $('trainStartBtn').disabled = job.running || install.running || !env.ok || selectedGpuWithoutCuda;
   $('trainStopBtn').disabled = !job.running;
+  if ($('balanceValBtn')) {
+    $('balanceValBtn').disabled = job.running || install.running || Number(dataset.train?.labeled_images || 0) <= 1;
+  }
   const finishedTrainingNow = state.trainJobWasRunning && !job.running;
   state.trainJobWasRunning = job.running;
   if (finishedTrainingNow) {
@@ -1255,6 +1264,70 @@ async function installTrainDeps(mode = 'default') {
   });
   renderTrainStatus(data);
   setStatus(mode === 'cuda' ? '显卡版 PyTorch 开始安装，日志会持续刷新' : '训练依赖开始安装，日志会持续刷新');
+}
+
+function valBalanceTargetRatio() {
+  const input = $('valBalanceRatioInput');
+  const raw = Number(input?.value || 10);
+  const percent = Math.min(50, Math.max(1, Number.isFinite(raw) ? raw : 10));
+  if (input) input.value = String(percent);
+  return percent / 100;
+}
+
+function balanceMovedPreview(result) {
+  const lines = (result.moved || []).slice(0, 8).map(item => {
+    const labelText = item.labels?.length ? ' · ' + item.labels.slice(0, 4).join(', ') : '';
+    return '- ' + item.from + ' → ' + item.to + '（' + item.boxes + ' 框' + labelText + '）';
+  });
+  const more = result.moved_count > lines.length ? '\n... 还有 ' + (result.moved_count - lines.length) + ' 张' : '';
+  return lines.join('\n') + more;
+}
+
+async function balanceValidationSet() {
+  const ratio = valBalanceTargetRatio();
+  const payload = {target_ratio: ratio, dry_run: true};
+  const preview = await api('/api/dataset/balance-val', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  if (!preview.moved_count) {
+    const current = preview.current_val_images || 0;
+    const target = preview.target_val_images || 0;
+    setStatus(current >= target
+      ? '验证集已达到目标比例，不需要移动'
+      : '没有可安全移动到 val 的已标注 train 图片');
+    return;
+  }
+
+  const percent = Math.round(ratio * 100);
+  const coverage = preview.total_classes_with_boxes
+    ? '类别覆盖 ' + preview.class_coverage_before + '/' + preview.total_classes_with_boxes
+      + ' → ' + preview.class_coverage_after + '/' + preview.total_classes_with_boxes
+    : '类别覆盖暂无数据';
+  const message = [
+    '准备把验证集补到约 ' + percent + '%：',
+    '当前 val：' + preview.current_val_images + ' 张，目标：' + preview.target_val_images + ' 张',
+    '将从 train 移动 ' + preview.moved_count + ' 张到 val',
+    coverage,
+    '',
+    balanceMovedPreview(preview),
+    '',
+    '确认移动？'
+  ].join('\n');
+  if (!window.confirm(message)) return;
+
+  const data = await api('/api/dataset/balance-val', {
+    method: 'POST',
+    body: JSON.stringify({target_ratio: ratio})
+  });
+  state.selectedImages.clear();
+  await loadFrames(state.split);
+  await updateTrainStatus();
+  setStatus(
+    '已移动 ' + data.moved_count + ' 张到 val；验证集 '
+    + data.final_val_images + '/' + data.total_labeled_images + ' 张，'
+    + '类别覆盖 ' + data.class_coverage_after + '/' + data.total_classes_with_boxes
+  );
 }
 
 function selectVisibleFrames() {
@@ -1479,6 +1552,7 @@ $('useVenvPythonBtn').onclick = () => {
 $('useBestModelBtn').onclick = useCurrentBestModel;
 $('installDepsBtn').onclick = () => busy($('installDepsBtn'), installTrainDeps);
 $('installCudaDepsBtn').onclick = () => busy($('installCudaDepsBtn'), () => installTrainDeps('cuda'));
+$('balanceValBtn').onclick = () => busy($('balanceValBtn'), balanceValidationSet);
 $('trainDeviceInput').onchange = () => updateTrainStatus().catch(error => setStatus(error.message));
 $('trainModeInput').onchange = () => {
   if ($('trainModeInput').value === 'incremental' && $('trainModelInput').value === 'yolov8n.pt' && state.patchModel?.pt_exists) {
