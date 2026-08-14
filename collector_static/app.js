@@ -45,6 +45,30 @@ function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
+function activateWorkbenchTab(group, target) {
+  document.querySelectorAll(`[data-tab-group="${group}"]`).forEach(button => {
+    button.classList.toggle('active', button.dataset.tabTarget === target);
+  });
+  const targets = group === 'left'
+    ? ['library', 'capture', 'labels', 'settings']
+    : ['annotations', 'training'];
+  for (const paneTarget of targets) {
+    const pane = document.querySelector(`[data-tab-pane="${paneTarget}"]`);
+    if (pane) pane.classList.toggle('active', paneTarget === target);
+  }
+}
+
+function setupWorkbenchTabs() {
+  document.querySelectorAll('[data-tab-group][data-tab-target]').forEach(button => {
+    button.onclick = () => activateWorkbenchTab(button.dataset.tabGroup, button.dataset.tabTarget);
+  });
+}
+
+function renderSplitButtons() {
+  $('trainBtn').classList.toggle('active', state.split === 'train');
+  $('valBtn').classList.toggle('active', state.split === 'val');
+}
+
 function setStatus(text) {
   $('status').textContent = text || '';
 }
@@ -464,6 +488,7 @@ async function finishDeleteClass(label, result) {
 async function loadFrames(split, preferredImage = null) {
   const splitChanged = state.split !== split;
   state.split = split;
+  renderSplitButtons();
   if (splitChanged) {
     state.selectedImages.clear();
     state.framePage = 0;
@@ -1700,4 +1725,5 @@ $('exportBtn').onclick = () => busy($('exportBtn'), async () => {
   await updateTrainStatus();
 });
 
+setupWorkbenchTabs();
 loadState().catch(error => setStatus(error.message));

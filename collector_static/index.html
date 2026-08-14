@@ -3,253 +3,281 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>百鬼夜行采集标注</title>
+  <title>百鬼工作台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css?v=20260814-fast-initial-load">
+  <link rel="stylesheet" href="/static/style.css?v=20260814-workbench-shell-v2">
 </head>
 <body>
-  <div class="app">
-    <aside class="side">
-      <section class="panel">
-        <h1>百鬼采集</h1>
-        <label>OAS 根目录</label>
-        <input id="oasRootInput" type="text" placeholder="点击下方按钮选择 OAS 根目录" readonly>
-        <button id="saveOasRootBtn">选择OAS目录</button>
-        <div id="oasRootNote" class="field-note"></div>
-        <label>数据集目录</label>
-        <input id="rootInput" type="text" readonly>
-        <button id="saveRootBtn">选择数据集</button>
-      </section>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand-block">
+        <div class="brand-mark">百</div>
+        <div>
+          <h1>百鬼工作台</h1>
+          <span>采集 · 标注 · 训练</span>
+        </div>
+      </div>
+      <div class="file-context">
+        <span>当前图片</span>
+        <strong id="currentFrame">未选择图片</strong>
+      </div>
+      <div class="header-actions">
+        <button id="prevBtn" class="button secondary nav-command" type="button"><span aria-hidden="true">&#8249;</span>上一张</button>
+        <button id="nextBtn" class="button secondary nav-command" type="button">下一张<span aria-hidden="true">&#8250;</span></button>
+        <button id="saveAnnBtn" class="button primary" type="button">保存标注</button>
+        <button id="exportBtn" class="button secondary" type="button">导出配置</button>
+      </div>
+    </header>
 
-      <section class="panel">
-        <h2>式神标签</h2>
-        <div class="row">
-          <select id="rarityInput">
-            <option value="sp">SP</option>
-            <option value="ssr">SSR</option>
-            <option value="sr">SR</option>
-            <option value="r">R</option>
-            <option value="n">N</option>
-            <option value="g">呱</option>
-          </select>
-          <input id="labelInput" type="text" placeholder="sp_036">
-        </div>
-        <input id="nameInput" type="text" placeholder="式神名称">
-        <button id="addClassBtn">添加标签</button>
-        <label>当前画框标签</label>
-        <select id="classSelect"></select>
-        <button id="deleteClassBtn" class="danger-btn" title="删除当前选中的标签">删除</button>
-      </section>
+    <div class="workbench">
+      <aside class="rail left-rail">
+        <nav class="rail-tabs" aria-label="数据工具">
+          <button class="rail-tab active" type="button" data-tab-group="left" data-tab-target="library">图库</button>
+          <button class="rail-tab" type="button" data-tab-group="left" data-tab-target="capture">采集</button>
+          <button class="rail-tab" type="button" data-tab-group="left" data-tab-target="labels">标签</button>
+          <button class="rail-tab" type="button" data-tab-group="left" data-tab-target="settings">设置</button>
+        </nav>
 
-      <section class="panel">
-        <h2>采集</h2>
-        <div class="row">
-          <input id="configInput" type="text" list="oasConfigList" placeholder="OAS 配置名">
-          <datalist id="oasConfigList"></datalist>
-          <select id="splitInput">
-            <option value="train">train</option>
-            <option value="val">val</option>
-          </select>
-        </div>
-        <button id="captureBtn">截图采集</button>
-        <div class="row">
-          <input id="recordSecondsInput" type="number" value="5" min="0.1" step="0.1">
-          <input id="recordIntervalInput" type="number" value="0.3" min="0.05" step="0.05">
-        </div>
-        <button id="recordBtn">连续采集</button>
-        <input id="videoPathInput" type="text" placeholder="D:\record.mp4">
-        <div class="row">
-          <input id="videoIntervalInput" type="number" value="0.2" min="0.01" step="0.01">
-          <input id="videoMaxInput" type="number" value="0" min="0" step="1">
-        </div>
-        <button id="videoBtn">录屏抽帧</button>
-      </section>
+        <div class="rail-content">
+          <section class="rail-pane active" data-tab-pane="library">
+            <div class="pane-heading">
+              <div>
+                <span class="eyebrow">DATASET</span>
+                <h2>图片库</h2>
+              </div>
+              <div class="segmented compact-segmented">
+                <button id="trainBtn" class="active" type="button">train</button>
+                <button id="valBtn" type="button">val</button>
+              </div>
+            </div>
 
-      <section class="panel">
-        <h2>图片</h2>
-        <div class="row">
-          <button id="trainBtn">train</button>
-          <button id="valBtn">val</button>
-        </div>
-        <label for="frameLabelFilter">筛选</label>
-        <select id="frameLabelFilter">
-          <option value="">全部标签</option>
-        </select>
-        <input id="frameSearchInput" type="text" placeholder="搜索文件名 / 标签 / 式神名">
-        <div class="filter-checks">
-          <label class="check">
-            <input id="onlyLabeledInput" type="checkbox">
-            只看有标注
-          </label>
-          <label class="check">
-            <input id="onlyUnlabeledInput" type="checkbox">
-            只看没标注
-          </label>
-          <label class="check">
-            <input id="onlyUntrainedInput" type="checkbox">
-            只看未训练
-          </label>
-        </div>
-        <div class="row">
-          <button id="selectVisibleBtn">选择当前列表</button>
-          <button id="clearSelectionBtn">清空选择</button>
-        </div>
-        <div class="row">
-          <button id="moveTrainBtn">移到 train</button>
-          <button id="moveValBtn">移到 val</button>
-        </div>
-        <button id="deleteFramesBtn" class="danger-btn" disabled>删除所选图片</button>
-        <div id="frameSummary" class="frame-summary"></div>
-        <div id="framePager" class="frame-pager">
-          <button id="framePagePrevBtn" type="button" title="上一页" aria-label="上一页">&#8249;</button>
-          <span id="framePageText">1 / 1</span>
-          <button id="framePageNextBtn" type="button" title="下一页" aria-label="下一页">&#8250;</button>
-        </div>
-        <div id="frameList" class="frame-list"></div>
-      </section>
+            <div class="filter-stack">
+              <input id="frameSearchInput" type="text" placeholder="搜索文件、标签或式神">
+              <select id="frameLabelFilter" aria-label="标签筛选">
+                <option value="">全部标签</option>
+              </select>
+              <div class="filter-checks">
+                <label class="check"><input id="onlyLabeledInput" type="checkbox">有标注</label>
+                <label class="check"><input id="onlyUnlabeledInput" type="checkbox">未标注</label>
+                <label class="check"><input id="onlyUntrainedInput" type="checkbox">未训练</label>
+              </div>
+            </div>
 
-    </aside>
+            <div id="frameSummary" class="frame-summary"></div>
+            <div id="framePager" class="frame-pager">
+              <button id="framePagePrevBtn" class="icon-button" type="button" title="上一页" aria-label="上一页">&#8249;</button>
+              <span id="framePageText">1 / 1</span>
+              <button id="framePageNextBtn" class="icon-button" type="button" title="下一页" aria-label="下一页">&#8250;</button>
+            </div>
+            <div id="frameList" class="frame-list"></div>
 
-    <main class="main">
-      <header class="toolbar">
-        <div id="currentFrame">未选择图片</div>
-        <div class="actions">
-          <button id="prevBtn">上一张</button>
-          <button id="nextBtn">下一张</button>
-          <button id="deleteBoxBtn">删除框</button>
-          <button id="clearBoxesBtn">清空框</button>
-          <button id="saveAnnBtn">保存标注</button>
-          <button id="exportBtn">导出配置</button>
+            <div class="batch-tools">
+              <div class="button-row">
+                <button id="selectVisibleBtn" class="button secondary" type="button">全选结果</button>
+                <button id="clearSelectionBtn" class="button secondary" type="button">取消选择</button>
+              </div>
+              <div class="button-row">
+                <button id="moveTrainBtn" class="button secondary" type="button">移到 train</button>
+                <button id="moveValBtn" class="button secondary" type="button">移到 val</button>
+              </div>
+              <button id="deleteFramesBtn" class="button danger secondary full-width" type="button" disabled>删除所选图片</button>
+            </div>
+          </section>
+
+          <section class="rail-pane" data-tab-pane="capture">
+            <div class="pane-heading">
+              <div><span class="eyebrow">SOURCE</span><h2>采集图片</h2></div>
+            </div>
+            <div class="form-stack">
+              <label class="field">
+                <span>OAS 配置</span>
+                <input id="configInput" type="text" list="oasConfigList" placeholder="配置名">
+                <datalist id="oasConfigList"></datalist>
+              </label>
+              <label class="field">
+                <span>保存分组</span>
+                <select id="splitInput">
+                  <option value="train">train</option>
+                  <option value="val">val</option>
+                </select>
+              </label>
+              <button id="captureBtn" class="button primary full-width" type="button">截图采集</button>
+
+              <div class="section-divider"><span>连续采集</span></div>
+              <div class="field-grid two-columns">
+                <label class="field"><span>时长（秒）</span><input id="recordSecondsInput" type="number" value="5" min="0.1" step="0.1"></label>
+                <label class="field"><span>间隔（秒）</span><input id="recordIntervalInput" type="number" value="0.3" min="0.05" step="0.05"></label>
+              </div>
+              <button id="recordBtn" class="button secondary full-width" type="button">开始连续采集</button>
+
+              <div class="section-divider"><span>录屏抽帧</span></div>
+              <label class="field"><span>视频文件</span><input id="videoPathInput" type="text" placeholder="D:\record.mp4"></label>
+              <div class="field-grid two-columns">
+                <label class="field"><span>间隔（秒）</span><input id="videoIntervalInput" type="number" value="0.2" min="0.01" step="0.01"></label>
+                <label class="field"><span>最多帧数</span><input id="videoMaxInput" type="number" value="0" min="0" step="1"></label>
+              </div>
+              <button id="videoBtn" class="button secondary full-width" type="button">导入并抽帧</button>
+            </div>
+          </section>
+
+          <section class="rail-pane" data-tab-pane="labels">
+            <div class="pane-heading">
+              <div><span class="eyebrow">CLASSES</span><h2>式神标签</h2></div>
+            </div>
+            <div class="form-stack">
+              <label class="field">
+                <span>当前画框标签</span>
+                <select id="classSelect"></select>
+              </label>
+              <button id="deleteClassBtn" class="button danger secondary full-width" type="button" title="删除当前选中的标签">删除当前标签</button>
+
+              <div class="section-divider"><span>添加标签</span></div>
+              <div class="field-grid two-columns">
+                <label class="field">
+                  <span>稀有度</span>
+                  <select id="rarityInput">
+                    <option value="sp">SP</option>
+                    <option value="ssr">SSR</option>
+                    <option value="sr">SR</option>
+                    <option value="r">R</option>
+                    <option value="n">N</option>
+                    <option value="g">呱</option>
+                  </select>
+                </label>
+                <label class="field"><span>标签代码</span><input id="labelInput" type="text" placeholder="sp_036"></label>
+              </div>
+              <label class="field"><span>式神名称</span><input id="nameInput" type="text" placeholder="式神名称"></label>
+              <button id="addClassBtn" class="button primary full-width" type="button">添加标签</button>
+            </div>
+          </section>
+
+          <section class="rail-pane" data-tab-pane="settings">
+            <div class="pane-heading">
+              <div><span class="eyebrow">PATHS</span><h2>工作台设置</h2></div>
+            </div>
+            <div class="form-stack">
+              <label class="field"><span>OAS 根目录</span><input id="oasRootInput" type="text" placeholder="选择 OAS 根目录" readonly></label>
+              <button id="saveOasRootBtn" class="button secondary full-width" type="button">选择 OAS 目录</button>
+              <div id="oasRootNote" class="field-note"></div>
+
+              <div class="section-divider"><span>数据集</span></div>
+              <label class="field"><span>数据集目录</span><input id="rootInput" type="text" readonly></label>
+              <button id="saveRootBtn" class="button secondary full-width" type="button">选择数据集目录</button>
+            </div>
+          </section>
         </div>
-      </header>
-      <section class="workspace">
-        <div class="center-column">
+      </aside>
+
+      <main class="canvas-column">
+        <div class="canvas-stage">
           <div class="canvas-wrap">
             <canvas id="canvas" width="1280" height="720"></canvas>
           </div>
-          <section class="model-panel">
-            <div class="model-controls">
-              <h2>模型预识别</h2>
-              <select id="detectModelInput" title="识别模型">
+        </div>
+
+        <section class="recognition-dock">
+          <div class="dock-heading">
+            <div><span class="eyebrow">ASSIST</span><h2>模型预识别</h2></div>
+            <label class="check inline-check"><input id="showLegacyInput" type="checkbox" checked>显示参考框</label>
+          </div>
+          <div class="recognition-fields">
+            <label class="field"><span>识别模型</span>
+              <select id="detectModelInput">
                 <option value="legacy">OAS 原模型</option>
-                <option value="patch">训练模型（刚生成）</option>
+                <option value="patch">当前训练模型</option>
                 <option value="both">原模型 + 训练模型</option>
               </select>
-              <select id="detectModelVersionInput" title="训练模型版本">
-                <option value="">当前模型</option>
-              </select>
-              <input id="legacyConfInput" type="number" value="0.25" min="0.01" max="1" step="0.01" title="置信度">
-              <input id="legacyIouInput" type="number" value="0.7" min="0.01" max="1" step="0.01" title="NMS IoU">
-              <button id="legacyCurrentBtn">预识别当前图</button>
-              <button id="legacyAllBtn">预识别当前分组</button>
-              <button id="autoAnnotateBtn">识别未标注并导出</button>
-              <span id="autoAnnotateHint" class="model-hint"></span>
-              <label class="check compact-check">
-                <input id="showLegacyInput" type="checkbox" checked>
-                显示参考框
-              </label>
+            </label>
+            <label class="field model-version-field"><span>模型版本</span><select id="detectModelVersionInput"><option value="">当前模型</option></select></label>
+            <label class="field numeric-field"><span>置信度</span><input id="legacyConfInput" type="number" value="0.25" min="0.01" max="1" step="0.01"></label>
+            <label class="field numeric-field"><span>NMS IoU</span><input id="legacyIouInput" type="number" value="0.7" min="0.01" max="1" step="0.01"></label>
+          </div>
+          <div class="recognition-actions">
+            <button id="legacyCurrentBtn" class="button primary" type="button">识别当前图</button>
+            <button id="legacyAllBtn" class="button secondary" type="button">识别当前分组</button>
+            <button id="autoAnnotateBtn" class="button secondary" type="button">识别未标注并导出</button>
+            <span id="autoAnnotateHint" class="model-hint"></span>
+          </div>
+          <pre id="status" class="status-line"></pre>
+        </section>
+      </main>
+
+      <aside class="rail right-rail">
+        <nav class="rail-tabs" aria-label="标注与训练">
+          <button class="rail-tab active" type="button" data-tab-group="right" data-tab-target="annotations">标注</button>
+          <button class="rail-tab" type="button" data-tab-group="right" data-tab-target="training">训练</button>
+        </nav>
+
+        <div class="rail-content">
+          <section class="rail-pane active" data-tab-pane="annotations">
+            <div class="pane-heading annotation-heading">
+              <div><span class="eyebrow">BOXES</span><h2>标注框</h2></div>
+              <div class="small-actions">
+                <button id="deleteBoxBtn" class="button secondary" type="button">删除框</button>
+                <button id="clearBoxesBtn" class="button secondary danger" type="button">清空</button>
+              </div>
             </div>
-            <pre id="status" class="model-status"></pre>
+            <div id="boxList" class="box-list"></div>
+            <div class="section-divider"><span>模型识别参考框</span></div>
+            <div id="legacyList" class="legacy-list"></div>
           </section>
-          <section class="panel train-panel">
-            <h2>训练</h2>
+
+          <section class="rail-pane training-pane" data-tab-pane="training">
+            <div class="pane-heading">
+              <div><span class="eyebrow">YOLO</span><h2>模型训练</h2></div>
+            </div>
             <div class="train-fields">
-              <label class="train-field train-python-field">
-                <span>训练 Python</span>
+              <label class="train-field span-two"><span>训练 Python</span>
                 <div class="python-row">
                   <input id="trainPythonInput" type="text" placeholder="toolkit\python.exe">
-                  <button id="useVenvPythonBtn" type="button">VENV</button>
-                  <button id="useOasPythonBtn" type="button">OAS</button>
+                  <button id="useVenvPythonBtn" class="button secondary" type="button">VENV</button>
+                  <button id="useOasPythonBtn" class="button secondary" type="button">OAS</button>
                 </div>
               </label>
-              <label class="train-field train-model-field">
-                <span>基础模型</span>
+              <label class="train-field span-two"><span>基础模型</span>
                 <div class="model-row">
                   <input id="trainModelInput" type="text" value="yolov8n.pt">
-                  <button id="useBestModelBtn" type="button">best.pt</button>
+                  <button id="useBestModelBtn" class="button secondary" type="button">best.pt</button>
                 </div>
               </label>
-              <label class="train-field">
-                <span>训练方式</span>
-                <select id="trainModeInput">
-                  <option value="full">全量训练</option>
-                  <option value="incremental">增量未训练</option>
-                </select>
-              </label>
-              <label class="train-field">
-                <span>设备</span>
-                <select id="trainDeviceInput">
-                  <option value="cpu">CPU</option>
-                  <option id="gpuDeviceOption" value="0">GPU 0</option>
-                </select>
-              </label>
-              <label class="train-field train-number">
-                <span>轮数</span>
-                <input id="trainEpochsInput" type="number" value="120" min="1" step="1">
-              </label>
-              <label class="train-field train-number">
-                <span>Batch</span>
-                <input id="trainBatchInput" type="number" value="16" min="-1" step="1">
-              </label>
-              <label class="train-field train-number">
-                <span>尺寸</span>
-                <input id="trainImgszInput" type="number" value="640" min="64" step="32">
-              </label>
-              <label class="train-field train-number">
-                <span>Workers</span>
-                <input id="trainWorkersInput" type="number" value="4" min="0" step="1">
-              </label>
-              <label class="train-field train-number">
-                <span>每类框上限</span>
-                <input id="trainMaxBoxesInput" type="number" value="30" min="0" step="1" title="0 表示不限制">
-              </label>
-              <label class="train-field">
-                <span>缓存</span>
-                <select id="trainCacheInput">
-                  <option value="ram">RAM</option>
-                  <option value="disk">磁盘</option>
-                  <option value="false">关闭</option>
-                </select>
-              </label>
+              <label class="train-field"><span>训练方式</span><select id="trainModeInput"><option value="full">全量训练</option><option value="incremental">增量未训练</option></select></label>
+              <label class="train-field"><span>设备</span><select id="trainDeviceInput"><option value="cpu">CPU</option><option id="gpuDeviceOption" value="0">GPU 0</option></select></label>
+              <label class="train-field"><span>轮数</span><input id="trainEpochsInput" type="number" value="120" min="1" step="1"></label>
+              <label class="train-field"><span>Batch</span><input id="trainBatchInput" type="number" value="16" min="-1" step="1"></label>
+              <label class="train-field"><span>尺寸</span><input id="trainImgszInput" type="number" value="640" min="64" step="32"></label>
+              <label class="train-field"><span>Workers</span><input id="trainWorkersInput" type="number" value="4" min="0" step="1"></label>
+              <label class="train-field"><span>每类框上限</span><input id="trainMaxBoxesInput" type="number" value="30" min="0" step="1" title="0 表示不限制"></label>
+              <label class="train-field"><span>缓存</span><select id="trainCacheInput"><option value="ram">RAM</option><option value="disk">磁盘</option><option value="false">关闭</option></select></label>
             </div>
+
             <div class="train-options">
-              <label class="check compact-check">
-                <input id="trainForceInput" type="checkbox">
-                忽略数据量警告
-              </label>
-              <label class="check compact-check">
-                <input id="trainArchiveInput" type="checkbox" checked>
-                训练前备份模型
-              </label>
+              <label class="check"><input id="trainForceInput" type="checkbox">忽略数据量警告</label>
+              <label class="check"><input id="trainArchiveInput" type="checkbox" checked>训练前备份模型</label>
             </div>
+
+            <div class="section-divider"><span>验证集</span></div>
             <div class="train-balance">
-              <label class="train-field train-number">
-                <span>验证集目标%</span>
-                <input id="valBalanceRatioInput" type="number" value="10" min="1" max="50" step="1">
-              </label>
-              <button id="balanceValBtn" type="button">自动补验证集</button>
+              <label class="train-field"><span>目标比例 %</span><input id="valBalanceRatioInput" type="number" value="10" min="1" max="50" step="1"></label>
+              <button id="balanceValBtn" class="button secondary" type="button">自动补验证集</button>
             </div>
-            <div class="field-note">从已标注 train 中挑图移动到 val，优先补齐验证集中缺少的标签。</div>
-            <div class="train-actions">
-              <button id="installDepsBtn" type="button">安装训练依赖</button>
-              <button id="installCudaDepsBtn" type="button">安装显卡版 PyTorch</button>
-              <button id="trainCheckBtn" type="button">检查训练</button>
-              <button id="trainStartBtn" type="button">开始训练</button>
-              <button id="trainStopBtn" class="danger-btn" type="button">停止训练</button>
+
+            <div class="train-actions primary-train-actions">
+              <button id="trainStartBtn" class="button primary" type="button">开始训练</button>
+              <button id="trainStopBtn" class="button danger" type="button">停止训练</button>
             </div>
+            <div class="train-actions utility-train-actions">
+              <button id="trainCheckBtn" class="button secondary" type="button">检查环境</button>
+              <button id="installDepsBtn" class="button secondary" type="button">安装训练依赖</button>
+              <button id="installCudaDepsBtn" class="button secondary" type="button">安装显卡 PyTorch</button>
+            </div>
+
             <div id="trainSummary" class="train-summary">正在读取训练状态...</div>
             <pre id="trainLog" class="train-log"></pre>
           </section>
         </div>
-        <aside class="box-panel">
-          <h2>标注框</h2>
-          <div id="boxList" class="box-list"></div>
-          <h2 class="subhead">模型识别参考框</h2>
-          <div id="legacyList" class="legacy-list"></div>
-        </aside>
-      </section>
-    </main>
+      </aside>
+    </div>
   </div>
-  <script src="/static/app.js?v=20260814-fast-initial-load-v3"></script>
+  <script src="/static/app.js?v=20260814-workbench-shell-v2"></script>
 </body>
 </html>
