@@ -745,6 +745,24 @@ function boxesFromDetections(detections) {
   return boxes;
 }
 
+function adoptRecognitionBox(box) {
+  const label = box.label;
+  if (!label) {
+    setStatus('这条模型识别结果没有标签，不能采用');
+    return;
+  }
+  const adopted = {label, x: box.x, y: box.y, w: box.w, h: box.h};
+  if (state.boxes.some(existing => sameAnnotationBox(existing, adopted))) {
+    setStatus(`已存在相同的 ${label} 标注框`);
+    return;
+  }
+  state.boxes.push(adopted);
+  state.selectedBox = state.boxes.length - 1;
+  renderBoxList();
+  draw();
+  setStatus(`已按识别标签 ${label} 采用参考框。记得点“保存标注”。`);
+}
+
 function adoptAllRecognitionLabels() {
   if (!state.legacy.length) {
     setStatus('当前图还没有模型识别框');
@@ -801,19 +819,10 @@ function renderLegacyList() {
 
     const adopt = document.createElement('button');
     adopt.className = 'mini-btn';
-    adopt.textContent = '按当前标签采用';
+    adopt.textContent = '按识别标签采用';
     adopt.onclick = (event) => {
       event.stopPropagation();
-      const label = $('classSelect').value;
-      if (!label) {
-        setStatus('先添加或选择一个要训练的新式神标签');
-        return;
-      }
-      state.boxes.push({label, x: box.x, y: box.y, w: box.w, h: box.h});
-      state.selectedBox = state.boxes.length - 1;
-      renderBoxList();
-      draw();
-      setStatus(`已用 ${label} 采用参考框`);
+      adoptRecognitionBox(box);
     };
 
     item.appendChild(meta);
