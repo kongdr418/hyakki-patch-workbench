@@ -869,16 +869,25 @@ function renderLegacyList() {
   state.legacy.forEach((box, index) => {
     const item = document.createElement('div');
     item.className = `legacy-item${index === state.selectedLegacy ? ' active' : ''}`;
+    item.tabIndex = 0;
+    item.setAttribute('aria-label', `选中参考框 ${index + 1}：${box.name}`);
 
-    const meta = document.createElement('div');
-    meta.className = 'legacy-meta';
-    meta.textContent = `${index + 1}. ${detectSourceBadge(box.source)} · ${box.label} · ${box.name} ${Math.round(box.conf * 100)}%`;
-    meta.onclick = () => {
+    const selectLegacyBox = () => {
       state.selectedLegacy = index;
       renderLegacyList();
       draw();
     };
+    item.onclick = selectLegacyBox;
+    item.onkeydown = (event) => {
+      if (event.target === item && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        selectLegacyBox();
+      }
+    };
 
+    const meta = document.createElement('div');
+    meta.className = 'legacy-meta';
+    meta.textContent = `${index + 1}. ${detectSourceBadge(box.source)} · ${box.label} · ${box.name} ${Math.round(box.conf * 100)}%`;
     const detail = document.createElement('div');
     detail.className = 'legacy-detail';
     detail.textContent = `${Math.round(box.w)}x${Math.round(box.h)} · ${box.rarity.toUpperCase()}`;

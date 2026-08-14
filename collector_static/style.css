@@ -653,6 +653,18 @@ canvas {
 .legacy-item {
   border-style: dashed;
   background: #fffdf7;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.legacy-item:hover {
+  border-color: var(--warning);
+  background: #fffaf0;
+}
+
+.legacy-item:focus-visible {
+  outline: 2px solid rgba(161, 92, 7, .35);
+  outline-offset: 1px;
 }
 
 .legacy-item.active {
@@ -661,7 +673,6 @@ canvas {
 }
 
 .legacy-meta {
-  cursor: pointer;
   font-weight: 700;
 }
 
