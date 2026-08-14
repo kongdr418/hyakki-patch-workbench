@@ -59,3 +59,13 @@ The workbench can create its own training virtual environment at:
 
 It uses OAS `toolkit\python.exe` only to create that environment. Training
 packages are installed into `.venv-yolo`, not into OAS itself.
+
+## Balanced Training Input
+
+Training limits each class to 30 annotation boxes by default. Classes with
+fewer boxes keep all of their data, while overrepresented classes are sampled
+down. The workbench creates a run-specific dataset view with hard-linked images
+and filtered label files, so the original images and annotations are unchanged.
+
+Set `每类框上限` in the training panel to another value, or set it to `0` to
+disable the limit. The validation split is never sampled down.

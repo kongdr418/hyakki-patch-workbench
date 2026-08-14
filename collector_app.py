@@ -26,6 +26,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from training_selection import select_training_items_by_class
+
 
 WORKBENCH_ROOT = Path(__file__).resolve().parent
 LOCAL_CONFIG_FILE = WORKBENCH_ROOT / "config.local.json"
@@ -275,6 +277,7 @@ class TrainStartIn(BaseModel):
     device: str = "cpu"
     workers: int = Field(default=4, ge=0, le=16)
     cache: str = Field(default="ram")
+    max_boxes_per_class: int = Field(default=30, ge=0, le=100000)
     name: str = "hya_patch"
     force: bool = False
     archive_existing: bool = True
@@ -1099,10 +1102,42 @@ def labeled_image_items(split: str, manifest: dict | None = None) -> list[dict]:
 def write_training_subset_yaml(run_id: str, train_items: list[dict], val_items: list[dict], classes: list[dict]) -> Path:
     subset_dir = TRAIN_RUNS_DIR / "datasets" / run_id
     subset_dir.mkdir(parents=True, exist_ok=True)
+    train_image_dir = subset_dir / "images" / "train"
+    train_label_dir = subset_dir / "labels" / "train"
+    train_image_dir.mkdir(parents=True, exist_ok=True)
+    train_label_dir.mkdir(parents=True, exist_ok=True)
+
+    train_paths = []
+    for item in train_items:
+        source_image = item["path"]
+        target_image = train_image_dir / source_image.name
+        try:
+            os.link(source_image, target_image)
+        except OSError:
+            shutil.copy2(source_image, target_image)
+
+        limits = Counter(item.get("training_class_counts") or item["class_counts"])
+        selected_lines = []
+        for line in item["label_path"].read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            try:
+                class_id = int(float(fields[0]))
+            except ValueError:
+                continue
+            if limits[class_id] <= 0:
+                continue
+            selected_lines.append(line)
+            limits[class_id] -= 1
+        target_label = train_label_dir / f"{source_image.stem}.txt"
+        target_label.write_text("\n".join(selected_lines) + "\n", encoding="utf-8")
+        train_paths.append(target_image)
+
     train_txt = subset_dir / "train.txt"
     val_txt = subset_dir / "val.txt"
     train_txt.write_text(
-        "\n".join(item["path"].as_posix() for item in train_items) + ("\n" if train_items else ""),
+        "\n".join(path.as_posix() for path in train_paths) + ("\n" if train_paths else ""),
         encoding="utf-8",
     )
     val_txt.write_text(
@@ -1122,17 +1157,18 @@ def write_training_subset_yaml(run_id: str, train_items: list[dict], val_items: 
     return data_yaml_path
 
 
-def prepare_training_dataset(mode: str, run_id: str) -> dict:
+def prepare_training_dataset(mode: str, run_id: str, max_boxes_per_class: int = 30) -> dict:
     classes = store.load_classes()
     manifest = load_training_manifest()
     train_items = labeled_image_items("train", manifest)
     val_items = labeled_image_items("val", manifest)
-    selected_train = [item for item in train_items if not item["trained"]] if mode == "incremental" else train_items
-    if not selected_train:
+    candidate_train = [item for item in train_items if not item["trained"]] if mode == "incremental" else train_items
+    if not candidate_train:
         detail = "没有可用于训练的已标注 train 图片"
         if mode == "incremental":
             detail = "没有新的已标注 train 图片；所有当前 train 标注都已经进入过模型训练"
         raise HTTPException(status_code=400, detail=detail)
+    selected_train, selection = select_training_items_by_class(candidate_train, max_boxes_per_class)
     data_yaml_path = write_training_subset_yaml(run_id, selected_train, val_items, classes)
     return {
         "data_yaml": data_yaml_path,
@@ -1140,6 +1176,7 @@ def prepare_training_dataset(mode: str, run_id: str) -> dict:
         "train_items": selected_train,
         "val_items": val_items,
         "all_train_items": train_items,
+        "selection": selection,
     }
 
 
@@ -1357,6 +1394,7 @@ def finalize_train_plan(exit_code: int | None):
         "data_yaml": plan["data_yaml"],
         "train_images": plan["train_images"],
         "val_images": plan["val_images"],
+        "selection": plan.get("selection"),
         "archive": plan.get("archive"),
     }
     manifest.setdefault("runs", []).append(run_record)
@@ -1872,6 +1910,7 @@ def current_train_job() -> dict:
             "exit_code": None,
             "command": _train_command,
             "started_at": _train_started_at,
+            "selection": _train_plan.get("selection") if _train_plan else None,
         }
     exit_code = _train_process.poll()
     if exit_code is not None:
@@ -1881,6 +1920,7 @@ def current_train_job() -> dict:
         "exit_code": exit_code,
         "command": _train_command,
         "started_at": _train_started_at,
+        "selection": _train_plan.get("selection") if _train_plan else None,
     }
 
 
@@ -2685,9 +2725,10 @@ def train_start(payload: TrainStartIn):
             raise HTTPException(status_code=400, detail=f"增量训练需要先有当前 best.pt: {PATCH_STABLE_PT_MODEL_FILE}")
         if base_model == "yolov8n.pt":
             base_model = str(train_base_model)
-    prepared = prepare_training_dataset(payload.mode, run_id)
+    prepared = prepare_training_dataset(payload.mode, run_id, payload.max_boxes_per_class)
     train_items = prepared["train_items"]
     val_items = prepared["val_items"]
+    selection = prepared["selection"]
     archive = archive_current_model("before_train") if payload.archive_existing else None
 
     TRAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2717,6 +2758,7 @@ def train_start(payload: TrainStartIn):
         "train_images": [item["image"] for item in train_items],
         "val_images": [item["image"] for item in val_items],
         "sample_digests": {item["image"]: item["digest"] for item in train_items},
+        "selection": selection,
         "archive": archive,
         "finalized": False,
     }
@@ -2725,7 +2767,9 @@ def train_start(payload: TrainStartIn):
         f"dataset: {store.root}\n"
         f"run: {run_id}\n"
         f"mode: {payload.mode}\n"
-        f"train images: {len(train_items)}\n"
+        f"per-class box limit: {payload.max_boxes_per_class or 'unlimited'}\n"
+        f"train images: {selection['selected_images']}/{selection['candidate_images']}\n"
+        f"train boxes: {selection['selected_boxes']}/{selection['candidate_boxes']}\n"
         f"val images: {len(val_items)}\n"
         f"archive: {archive['path'] if archive else 'none'}\n"
         f"command: {' '.join(_train_command)}\n\n",

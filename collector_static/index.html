@@ -194,6 +194,10 @@
                 <span>Workers</span>
                 <input id="trainWorkersInput" type="number" value="4" min="0" step="1">
               </label>
+              <label class="train-field train-number">
+                <span>每类框上限</span>
+                <input id="trainMaxBoxesInput" type="number" value="30" min="0" step="1" title="0 表示不限制">
+              </label>
               <label class="train-field">
                 <span>缓存</span>
                 <select id="trainCacheInput">
@@ -241,6 +245,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260803-adopt-recognition-label"></script>
+  <script src="/static/app.js?v=20260814-balanced-training-sample"></script>
 </body>
 </html>

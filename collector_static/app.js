@@ -997,6 +997,7 @@ function trainSettings() {
     device: $('trainDeviceInput').value || 'cpu',
     workers: Number($('trainWorkersInput').value || 4),
     cache: $('trainCacheInput').value || 'ram',
+    max_boxes_per_class: Math.max(0, Number($('trainMaxBoxesInput').value || 0)),
     force: $('trainForceInput').checked,
     archive_existing: $('trainArchiveInput').checked
   };
@@ -1169,6 +1170,10 @@ function renderTrainStatus(data) {
   const archiveText = data.model.latest_archive
     ? `最近备份：${escapeHtml(data.model.latest_archive.id)}`
     : '最近备份：无';
+  const selection = job.selection;
+  const selectionText = selection
+    ? `本次训练采样：${selection.selected_images}/${selection.candidate_images} 张，${selection.selected_boxes}/${selection.candidate_boxes} 框，每类上限 ${selection.max_boxes_per_class || '不限'}`
+    : '';
   const totalLabeledImages = Number(dataset.total_labeled_images || ((dataset.train?.labeled_images || 0) + (dataset.val?.labeled_images || 0)));
   const valImageRatio = totalLabeledImages ? Number(dataset.val_image_ratio || 0) : 0;
   const valRatioText = totalLabeledImages
@@ -1204,6 +1209,7 @@ function renderTrainStatus(data) {
     <div class="train-line">${escapeHtml(gpuText(env))}</div>
     <div class="train-line">安装：${installText} · 任务：${jobText} · 模型：${modelText} · ${ptText}</div>
     <div class="train-line">${archiveText}</div>
+    ${selectionText ? `<div class="train-line">${selectionText}</div>` : ''}
     <div class="train-line">${valRatioText}</div>
     ${envError}
     ${gpuWarning}
@@ -1257,7 +1263,11 @@ async function startTraining() {
     body: JSON.stringify(trainSettings())
   });
   renderTrainStatus(data);
-  setStatus('训练已启动，可在训练面板查看日志');
+  const selection = data.job?.selection;
+  const detail = selection
+    ? `，已从 ${selection.candidate_images} 张候选图片中选择 ${selection.selected_images} 张`
+    : '';
+  setStatus(`训练已启动${detail}，可在训练面板查看日志`);
 }
 
 async function stopTraining() {
