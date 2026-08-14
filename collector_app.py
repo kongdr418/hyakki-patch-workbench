@@ -139,6 +139,8 @@ ENV_CHECK_TIMEOUT = 120
 ENV_CHECK_CACHE_SECONDS = 300
 ENV_CHECK_FILE_CACHE_SECONDS = 24 * 60 * 60
 ENV_CHECK_CACHE_FILE = TRAIN_RUNS_DIR / "environment_check_cache.json"
+DATASET_VIEW_CACHE_FILE = TRAIN_RUNS_DIR / "dataset_view_cache.json"
+DATASET_VIEW_CACHE_VERSION = 3
 SAMPLE_DIGEST_VERSION = 2
 
 RARITIES = ("buff", "sp", "ssr", "sr", "r", "n", "g")
@@ -169,6 +171,21 @@ _install_started_at: float | None = None
 _environment_cache: dict[str, tuple[float, dict]] = {}
 _directory_picker_lock = threading.Lock()
 _train_plan: dict | None = None
+_dataset_view_cache: dict | None = None
+_dataset_view_cache_lock = threading.RLock()
+
+
+def invalidate_dataset_view_cache():
+    global _dataset_view_cache
+
+    with _dataset_view_cache_lock:
+        _dataset_view_cache = None
+    try:
+        DATASET_VIEW_CACHE_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 class Store:
@@ -190,6 +207,7 @@ class Store:
             path = PROJECT_ROOT / path
         self.root = path
         self.ensure()
+        invalidate_dataset_view_cache()
 
     def ensure(self):
         for split in ("train", "val"):
@@ -217,6 +235,7 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.classes_path.open("w", encoding="utf-8") as f:
             json.dump(classes, f, ensure_ascii=False, indent=2)
+        invalidate_dataset_view_cache()
 
 
 store = Store()
@@ -991,6 +1010,7 @@ def save_training_manifest(manifest: dict):
     store.training_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with store.training_manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
+    invalidate_dataset_view_cache()
 
 
 def sample_digest_for_files(image_file: Path, label_file: Path) -> str:
@@ -1232,41 +1252,7 @@ def legacy_classes_for_picker() -> list[dict]:
 
 
 def class_usage_stats(classes: list[dict]) -> dict[str, dict]:
-    usage = {
-        item["label"]: {"boxes": 0, "images": 0}
-        for item in classes
-        if item.get("label")
-    }
-    if not classes:
-        return usage
-    index_to_label = {index: item["label"] for index, item in enumerate(classes)}
-    for split in ("train", "val"):
-        label_dir = store.root / "labels" / split
-        if not label_dir.exists():
-            continue
-        for label_file in label_dir.glob("*.txt"):
-            labels_in_image: set[str] = set()
-            try:
-                lines = label_file.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                fields = line.split()
-                if not fields:
-                    continue
-                try:
-                    class_index = int(float(fields[0]))
-                except ValueError:
-                    continue
-                label = index_to_label.get(class_index)
-                if not label:
-                    continue
-                entry = usage.setdefault(label, {"boxes": 0, "images": 0})
-                entry["boxes"] += 1
-                labels_in_image.add(label)
-            for label in labels_in_image:
-                usage.setdefault(label, {"boxes": 0, "images": 0})["images"] += 1
-    return usage
+    return get_dataset_view(classes)["class_usage"]
 
 
 def latest_model_archive() -> dict | None:
@@ -1413,45 +1399,11 @@ def finalize_train_plan(exit_code: int | None):
 
 
 def split_stats(split: str) -> dict:
-    image_dir = store.root / "images" / split
-    images = sorted(image_dir.glob("*.png"))
-    items = labeled_image_items(split)
-    labeled_images = len(items)
-    boxes = sum(item["boxes"] for item in items)
-    untrained_items = [item for item in items if not item["trained"]]
-    return {
-        "images": len(images),
-        "labeled_images": labeled_images,
-        "boxes": boxes,
-        "trained_labeled_images": labeled_images - len(untrained_items),
-        "untrained_images": len(images) - (labeled_images - len(untrained_items)),
-        "untrained_labeled_images": len(untrained_items),
-        "untrained_boxes": sum(item["boxes"] for item in untrained_items),
-    }
+    return dict(get_dataset_view()["split_stats"][split])
 
 
 def dataset_training_stats() -> dict:
-    classes = store.load_classes()
-    train = split_stats("train")
-    val = split_stats("val")
-    total_labeled_images = train["labeled_images"] + val["labeled_images"]
-    val_image_ratio = val["labeled_images"] / total_labeled_images if total_labeled_images else 0
-    warnings = []
-    if not classes:
-        warnings.append("还没有导出任何式神标签")
-    if train["boxes"] < 20:
-        warnings.append("train 标注框偏少，建议至少 30-50 个框再训练")
-    if val["boxes"] < 5:
-        warnings.append("val 验证框偏少，建议至少 5-10 个框")
-    return {
-        "classes": classes,
-        "train": train,
-        "val": val,
-        "total_labeled_images": total_labeled_images,
-        "val_image_ratio": val_image_ratio,
-        "warnings": warnings,
-        "ready": bool(classes) and train["boxes"] >= 20 and val["boxes"] >= 5,
-    }
+    return get_dataset_view()["training_stats"]
 
 
 def clean_python_path(path: str | None) -> str:
@@ -1970,6 +1922,7 @@ def save_rgb_image(image, split: str, prefix: str = "cap") -> str:
     name = f"{prefix}_{datetime.now().strftime('%Y%m%dT%H%M%S')}_{int(time.time() * 1000) % 1000:03d}.png"
     path = store.root / "images" / split / name
     cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    invalidate_dataset_view_cache()
     return f"{split}/{name}"
 
 
@@ -1977,6 +1930,7 @@ def save_bgr_image(image, split: str, prefix: str = "frame") -> str:
     name = f"{prefix}_{datetime.now().strftime('%Y%m%dT%H%M%S')}_{int(time.time() * 1000) % 1000:03d}.png"
     path = store.root / "images" / split / name
     cv2.imwrite(str(path), image)
+    invalidate_dataset_view_cache()
     return f"{split}/{name}"
 
 
@@ -2045,6 +1999,160 @@ def frame_item(path: Path, split: str, classes: list[dict], manifest: dict | Non
     }
 
 
+def _path_signature(path: Path) -> list[int | bool]:
+    try:
+        stat = path.stat()
+        return [True, stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        return [False, 0, 0]
+
+
+def dataset_view_fingerprint() -> dict:
+    paths = [store.classes_path, store.training_manifest_path]
+    for split in ("train", "val"):
+        paths.append(store.root / "images" / split)
+        paths.append(store.root / "labels" / split)
+    return {
+        "root": str(store.root.resolve()),
+        "paths": [_path_signature(path) for path in paths],
+    }
+
+
+def _split_stats_from_frames(frames: list[dict]) -> dict:
+    labeled = [frame for frame in frames if frame["boxes"]]
+    untrained_labeled = [frame for frame in labeled if not frame["trained"]]
+    trained_labeled = len(labeled) - len(untrained_labeled)
+    return {
+        "images": len(frames),
+        "labeled_images": len(labeled),
+        "boxes": sum(len(frame["boxes"]) for frame in labeled),
+        "trained_labeled_images": trained_labeled,
+        "untrained_images": len(frames) - trained_labeled,
+        "untrained_labeled_images": len(untrained_labeled),
+        "untrained_boxes": sum(len(frame["boxes"]) for frame in untrained_labeled),
+    }
+
+
+def _frame_summary(frame: dict) -> dict:
+    return {
+        "image": frame["image"],
+        "mtime": frame["mtime"],
+        "box_count": len(frame["boxes"]),
+        "box_labels": [box["label"] for box in frame["boxes"]],
+        "trained": frame["trained"],
+    }
+
+
+def _build_dataset_view(classes: list[dict], fingerprint: dict) -> dict:
+    manifest = load_training_manifest()
+    frames = {}
+    for split in ("train", "val"):
+        files = sorted((store.root / "images" / split).glob("*.png"), key=lambda p: p.stat().st_mtime)
+        frames[split] = [frame_item(path, split, classes, manifest) for path in files]
+
+    usage = {
+        item["label"]: {"boxes": 0, "images": 0}
+        for item in classes
+        if item.get("label")
+    }
+    for split_frames in frames.values():
+        for frame in split_frames:
+            labels_in_image = set()
+            for box in frame["boxes"]:
+                label = box["label"]
+                entry = usage.setdefault(label, {"boxes": 0, "images": 0})
+                entry["boxes"] += 1
+                labels_in_image.add(label)
+            for label in labels_in_image:
+                usage[label]["images"] += 1
+
+    split_stats_data = {
+        split: _split_stats_from_frames(split_frames)
+        for split, split_frames in frames.items()
+    }
+    train = split_stats_data["train"]
+    val = split_stats_data["val"]
+    total_labeled_images = train["labeled_images"] + val["labeled_images"]
+    warnings = []
+    if not classes:
+        warnings.append("还没有导出任何式神标签")
+    if train["boxes"] < 20:
+        warnings.append("train 标注框偏少，建议至少 30-50 个框再训练")
+    if val["boxes"] < 5:
+        warnings.append("val 验证框偏少，建议至少 5-10 个框")
+    training_stats = {
+        "classes": classes,
+        "train": train,
+        "val": val,
+        "total_labeled_images": total_labeled_images,
+        "val_image_ratio": val["labeled_images"] / total_labeled_images if total_labeled_images else 0,
+        "warnings": warnings,
+        "ready": bool(classes) and train["boxes"] >= 20 and val["boxes"] >= 5,
+    }
+    return {
+        "fingerprint": fingerprint,
+        "frames": frames,
+        "frame_summaries": {
+            split: [_frame_summary(frame) for frame in split_frames]
+            for split, split_frames in frames.items()
+        },
+        "class_usage": usage,
+        "split_stats": split_stats_data,
+        "training_stats": training_stats,
+    }
+
+
+def _load_dataset_view_file(fingerprint: dict) -> dict | None:
+    if not DATASET_VIEW_CACHE_FILE.exists():
+        return None
+    try:
+        with DATASET_VIEW_CACHE_FILE.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("version") != DATASET_VIEW_CACHE_VERSION or payload.get("fingerprint") != fingerprint:
+        return None
+    view = payload.get("view")
+    return view if isinstance(view, dict) else None
+
+
+def _save_dataset_view_file(fingerprint: dict, view: dict):
+    TRAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = DATASET_VIEW_CACHE_FILE.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump({
+            "version": DATASET_VIEW_CACHE_VERSION,
+            "fingerprint": fingerprint,
+            "view": view,
+        }, f, ensure_ascii=False, separators=(",", ":"))
+    tmp_path.replace(DATASET_VIEW_CACHE_FILE)
+
+
+def get_dataset_view(classes: list[dict] | None = None) -> dict:
+    global _dataset_view_cache
+
+    fingerprint = dataset_view_fingerprint()
+    with _dataset_view_cache_lock:
+        if _dataset_view_cache and _dataset_view_cache.get("fingerprint") == fingerprint:
+            return _dataset_view_cache
+        cached = _load_dataset_view_file(fingerprint)
+        if cached is not None:
+            _dataset_view_cache = cached
+            return cached
+        resolved_classes = classes if classes is not None else store.load_classes()
+        view = _build_dataset_view(resolved_classes, fingerprint)
+        fingerprint = dataset_view_fingerprint()
+        view["fingerprint"] = fingerprint
+        try:
+            _save_dataset_view_file(fingerprint, view)
+        except OSError:
+            pass
+        _dataset_view_cache = view
+        return view
+
+
 def move_frame_item(image_rel: str, target: str) -> dict | None:
     source_image, source_split = image_path(image_rel)
     if source_split == target:
@@ -2063,6 +2171,7 @@ def move_frame_item(image_rel: str, target: str) -> dict | None:
     shutil.move(str(source_image), str(target_image))
     if source_label.exists():
         shutil.move(str(source_label), str(target_label))
+    invalidate_dataset_view_cache()
     return {
         "from": image_rel,
         "to": f"{target}/{target_image.name}",
@@ -2208,6 +2317,7 @@ def delete_frame_item(image_rel: str) -> dict:
     if label_file.exists():
         label_file.unlink()
         label_deleted = True
+    invalidate_dataset_view_cache()
     return {
         "image": image_rel,
         "label_deleted": label_deleted,
@@ -2222,14 +2332,15 @@ def index():
 @app.get("/api/state")
 def state():
     classes = store.load_classes()
+    dataset_view = get_dataset_view(classes)
     return {
         "root": str(store.root),
         "classes": classes,
         "legacy_classes": legacy_classes_for_picker(),
-        "class_usage": class_usage_stats(classes),
+        "class_usage": dataset_view["class_usage"],
         "frames": {
-            "train": len(list((store.root / "images" / "train").glob("*.png"))),
-            "val": len(list((store.root / "images" / "val").glob("*.png"))),
+            "train": len(dataset_view["frames"]["train"]),
+            "val": len(dataset_view["frames"]["val"]),
         },
         "export": {
             "patch_labels": str(PATCH_LABELS_FILE),
@@ -2274,9 +2385,16 @@ def pick_directory_api(payload: DirectoryPickIn):
 @app.get("/api/frames")
 def frames(split: Literal["train", "val"] = "train"):
     classes = store.load_classes()
-    manifest = load_training_manifest()
-    files = sorted((store.root / "images" / split).glob("*.png"), key=lambda p: p.stat().st_mtime)
-    return {"frames": [frame_item(path, split, classes, manifest) for path in files]}
+    return {"frames": get_dataset_view(classes)["frame_summaries"][split]}
+
+
+@app.get("/api/frame")
+def frame(image: str = Query(...)):
+    _path, split = image_path(image)
+    for item in get_dataset_view()["frames"][split]:
+        if item["image"] == image:
+            return {"frame": item}
+    raise HTTPException(status_code=404, detail=f"Image not found: {image}")
 
 
 @app.post("/api/frames/move")
@@ -2573,6 +2691,7 @@ def save_annotations(payload: AnnotationIn):
     label_path = label_path_for_image(payload.image)
     label_path.parent.mkdir(parents=True, exist_ok=True)
     label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    invalidate_dataset_view_cache()
     return {
         "saved": payload.image,
         "boxes": read_annotations(payload.image, classes),

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼夜行采集标注</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css?v=20260703-train-perf">
+  <link rel="stylesheet" href="/static/style.css?v=20260814-fast-initial-load">
 </head>
 <body>
   <div class="app">
@@ -71,7 +71,7 @@
           <button id="trainBtn">train</button>
           <button id="valBtn">val</button>
         </div>
-        <label>筛选</label>
+        <label for="frameLabelFilter">筛选</label>
         <select id="frameLabelFilter">
           <option value="">全部标签</option>
         </select>
@@ -100,6 +100,11 @@
         </div>
         <button id="deleteFramesBtn" class="danger-btn" disabled>删除所选图片</button>
         <div id="frameSummary" class="frame-summary"></div>
+        <div id="framePager" class="frame-pager">
+          <button id="framePagePrevBtn" type="button" title="上一页" aria-label="上一页">&#8249;</button>
+          <span id="framePageText">1 / 1</span>
+          <button id="framePageNextBtn" type="button" title="下一页" aria-label="下一页">&#8250;</button>
+        </div>
         <div id="frameList" class="frame-list"></div>
       </section>
 
@@ -232,7 +237,7 @@
               <button id="trainStartBtn" type="button">开始训练</button>
               <button id="trainStopBtn" class="danger-btn" type="button">停止训练</button>
             </div>
-            <div id="trainSummary" class="train-summary"></div>
+            <div id="trainSummary" class="train-summary">正在读取训练状态...</div>
             <pre id="trainLog" class="train-log"></pre>
           </section>
         </div>
@@ -245,6 +250,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js?v=20260814-balanced-training-sample"></script>
+  <script src="/static/app.js?v=20260814-fast-initial-load-v3"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ const state = {
   legacyClasses: [],
   classUsage: {},
   split: 'train',
+  framePage: 0,
   frames: [],
   index: -1,
   image: new Image(),
@@ -38,6 +39,7 @@ const RARITY_NAMES = {
   other: '其他'
 };
 const AUTO_ANNOTATE_CONF_THRESHOLD = 0.8;
+const FRAME_PAGE_SIZE = 100;
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -353,6 +355,7 @@ async function pickDirectory(title, initial = '') {
 }
 
 async function loadState() {
+  updateTrainStatus().catch(error => setStatus(error.message));
   const data = await api('/api/state');
   state.root = data.root;
   state.classes = data.classes;
@@ -369,7 +372,6 @@ async function loadState() {
   renderModelVersionOptions();
   renderLegacyList();
   await loadFrames(state.split);
-  updateTrainStatus().catch(error => setStatus(error.message));
 }
 
 function renderClasses() {
@@ -462,9 +464,15 @@ async function finishDeleteClass(label, result) {
 async function loadFrames(split, preferredImage = null) {
   const splitChanged = state.split !== split;
   state.split = split;
-  if (splitChanged) state.selectedImages.clear();
+  if (splitChanged) {
+    state.selectedImages.clear();
+    state.framePage = 0;
+  }
   const data = await api(`/api/frames?split=${split}`);
-  state.frames = data.frames;
+  state.frames = data.frames.map(frame => ({
+    ...frame,
+    name: frame.image.split('/').pop() || frame.image,
+  }));
   if (state.frames.length === 0) {
     state.index = -1;
     state.boxes = [];
@@ -481,6 +489,7 @@ async function loadFrames(split, preferredImage = null) {
     if (preferredIndex >= 0) state.index = preferredIndex;
   }
   if (state.index < 0 || state.index >= state.frames.length) state.index = 0;
+  syncFramePageToIndex();
   renderFrameList();
   await openFrame(state.index);
 }
@@ -496,16 +505,16 @@ function frameMatchesFilter(frame) {
   const onlyLabeled = $('onlyLabeledInput')?.checked || false;
   const onlyUnlabeled = $('onlyUnlabeledInput')?.checked || false;
   const onlyUntrained = $('onlyUntrainedInput')?.checked || false;
-  if (onlyLabeled && frame.boxes.length === 0) return false;
-  if (onlyUnlabeled && frame.boxes.length > 0) return false;
+  if (onlyLabeled && frame.box_count === 0) return false;
+  if (onlyUnlabeled && frame.box_count > 0) return false;
   if (onlyUntrained && frame.trained) return false;
-  if (labelFilter && !frame.boxes.some(box => box.label === labelFilter)) return false;
+  if (labelFilter && !frame.box_labels.includes(labelFilter)) return false;
   if (!query) return true;
 
   const haystack = [
     frame.name,
     frame.image,
-    ...frame.boxes.flatMap(box => [box.label, classNameForLabel(box.label)])
+    ...frame.box_labels.flatMap(label => [label, classNameForLabel(label)])
   ].join(' ').toLowerCase();
   return haystack.includes(query);
 }
@@ -516,11 +525,31 @@ function filteredFrameEntries() {
     .filter(item => frameMatchesFilter(item.frame));
 }
 
+function syncFramePageToIndex(entries = filteredFrameEntries()) {
+  const activePosition = entries.findIndex(entry => entry.index === state.index);
+  if (activePosition >= 0) {
+    state.framePage = Math.floor(activePosition / FRAME_PAGE_SIZE);
+  }
+}
+
+function renderFramePager(visibleCount) {
+  const pageCount = Math.max(1, Math.ceil(visibleCount / FRAME_PAGE_SIZE));
+  state.framePage = Math.min(Math.max(0, state.framePage), pageCount - 1);
+  $('framePageText').textContent = `${state.framePage + 1} / ${pageCount}`;
+  $('framePagePrevBtn').disabled = state.framePage <= 0;
+  $('framePageNextBtn').disabled = state.framePage >= pageCount - 1;
+  $('framePager').style.display = visibleCount > FRAME_PAGE_SIZE ? 'grid' : 'none';
+}
+
 function renderFrameList() {
   const list = $('frameList');
   list.innerHTML = '';
   const entries = filteredFrameEntries();
-  entries.forEach(({frame, index}, visibleIndex) => {
+  const pageCount = Math.max(1, Math.ceil(entries.length / FRAME_PAGE_SIZE));
+  state.framePage = Math.min(Math.max(0, state.framePage), pageCount - 1);
+  const pageStart = state.framePage * FRAME_PAGE_SIZE;
+  const pageEntries = entries.slice(pageStart, pageStart + FRAME_PAGE_SIZE);
+  pageEntries.forEach(({frame, index}, visibleIndex) => {
     const item = document.createElement('div');
     item.className = `frame-item${index === state.index ? ' active' : ''}`;
     const checkbox = document.createElement('input');
@@ -539,14 +568,15 @@ function renderFrameList() {
     const title = document.createElement('button');
     title.type = 'button';
     title.className = 'frame-open';
-    const trainMark = frame.trained ? ' · 已训' : (frame.boxes.length ? ' · 未训' : ' · 未标注');
-    title.textContent = `${visibleIndex + 1}. ${frame.name} (${frame.boxes.length})${trainMark}`;
+    const trainMark = frame.trained ? ' · 已训' : (frame.box_count ? ' · 未训' : ' · 未标注');
+    title.textContent = `${pageStart + visibleIndex + 1}. ${frame.name} (${frame.box_count})${trainMark}`;
     title.onclick = () => openFrame(index);
 
     item.appendChild(checkbox);
     item.appendChild(title);
     list.appendChild(item);
   });
+  renderFramePager(entries.length);
   renderFrameSummary(entries.length);
 }
 
@@ -563,6 +593,8 @@ function frameFromImageRel(image) {
   return {
     image,
     name: image.split('/').pop() || image,
+    box_count: 0,
+    box_labels: [],
     boxes: [],
     mtime: Date.now() / 1000,
     trained: false,
@@ -574,7 +606,14 @@ function frameFromImageRel(image) {
 async function openFrame(index) {
   if (index < 0 || index >= state.frames.length) return;
   state.index = index;
-  const frame = state.frames[index];
+  let frame = state.frames[index];
+  if (!Array.isArray(frame.boxes)) {
+    const data = await api(`/api/frame?image=${encodeURIComponent(frame.image)}`);
+    frame = {...frame, ...data.frame};
+    frame.box_count = frame.boxes.length;
+    frame.box_labels = frame.boxes.map(box => box.label);
+    state.frames[index] = frame;
+  }
   state.boxes = frame.boxes.map(box => ({...box}));
   state.legacy = state.legacyByImage[frame.image] || [];
   state.selectedBox = -1;
@@ -588,6 +627,7 @@ async function openFrame(index) {
   });
   canvas.width = state.image.naturalWidth;
   canvas.height = state.image.naturalHeight;
+  syncFramePageToIndex();
   renderFrameList();
   renderBoxList();
   renderLegacyList();
@@ -851,7 +891,11 @@ async function saveImageAnnotations(image, boxes) {
     body: JSON.stringify({image, boxes})
   });
   const frame = state.frames.find(item => item.image === image);
-  const oldBoxes = frame ? frame.boxes.map(box => ({...box})) : [];
+  const oldBoxes = frame
+    ? (Array.isArray(frame.boxes)
+      ? frame.boxes.map(box => ({...box}))
+      : frame.box_labels.map(label => ({label})))
+    : [];
   adjustClassUsage(oldBoxes, data.boxes || []);
   if (data.classes) {
     state.classes = data.classes;
@@ -859,6 +903,8 @@ async function saveImageAnnotations(image, boxes) {
   renderClasses();
   if (frame) {
     frame.boxes = data.boxes;
+    frame.box_count = data.boxes.length;
+    frame.box_labels = data.boxes.map(box => box.label);
     frame.trained = false;
     frame.trained_at = '';
     frame.last_train_run = '';
@@ -931,7 +977,7 @@ function chunkItems(items, size) {
 
 async function autoAnnotateUnlabeledAndExport() {
   const targets = state.frames
-    .filter(frame => frame.boxes.length === 0)
+    .filter(frame => frame.box_count === 0)
     .map(frame => frame.image);
   if (!targets.length) {
     setStatus(`${state.split} 当前没有未标注图片`);
@@ -1391,7 +1437,9 @@ async function deleteSelectedFrames() {
   }
   const deletedFrameBoxes = state.frames
     .filter(frame => images.includes(frame.image))
-    .flatMap(frame => frame.boxes || []);
+    .flatMap(frame => Array.isArray(frame.boxes)
+      ? frame.boxes
+      : frame.box_labels.map(label => ({label})));
   const data = await api('/api/frames/delete', {
     method: 'POST',
     body: JSON.stringify({images})
@@ -1584,13 +1632,18 @@ $('frameLabelFilter').onchange = () => {
   if ($('frameLabelFilter').value) {
     $('onlyUnlabeledInput').checked = false;
   }
+  state.framePage = 0;
   renderFrameList();
 };
-$('frameSearchInput').oninput = renderFrameList;
+$('frameSearchInput').oninput = () => {
+  state.framePage = 0;
+  renderFrameList();
+};
 $('onlyLabeledInput').onchange = () => {
   if ($('onlyLabeledInput').checked) {
     $('onlyUnlabeledInput').checked = false;
   }
+  state.framePage = 0;
   renderFrameList();
 };
 $('onlyUnlabeledInput').onchange = () => {
@@ -1599,12 +1652,22 @@ $('onlyUnlabeledInput').onchange = () => {
     $('onlyUntrainedInput').checked = false;
     $('frameLabelFilter').value = '';
   }
+  state.framePage = 0;
   renderFrameList();
 };
 $('onlyUntrainedInput').onchange = () => {
   if ($('onlyUntrainedInput').checked) {
     $('onlyUnlabeledInput').checked = false;
   }
+  state.framePage = 0;
+  renderFrameList();
+};
+$('framePagePrevBtn').onclick = () => {
+  state.framePage = Math.max(0, state.framePage - 1);
+  renderFrameList();
+};
+$('framePageNextBtn').onclick = () => {
+  state.framePage += 1;
   renderFrameList();
 };
 $('selectVisibleBtn').onclick = selectVisibleFrames;
