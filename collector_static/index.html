@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>百鬼工作台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css?v=20260814-workbench-shell-v2">
+  <link rel="stylesheet" href="/static/style.css?v=20260814-canvas-fit-v3">
 </head>
 <body>
   <div class="app-shell">
@@ -272,12 +272,18 @@
             </div>
 
             <div id="trainSummary" class="train-summary">正在读取训练状态...</div>
-            <pre id="trainLog" class="train-log"></pre>
+            <section id="trainLogPanel" class="train-log-panel" aria-label="训练日志" hidden>
+              <div class="train-log-toolbar">
+                <strong>训练日志</strong>
+                <button id="trainLogExpandBtn" class="train-log-expand" type="button" aria-expanded="false">展开查看</button>
+              </div>
+              <pre id="trainLog" class="train-log" tabindex="0"></pre>
+            </section>
           </section>
         </div>
       </aside>
     </div>
   </div>
-  <script src="/static/app.js?v=20260814-workbench-shell-v2"></script>
+  <script src="/static/app.js?v=20260814-canvas-fit-v3"></script>
 </body>
 </html>

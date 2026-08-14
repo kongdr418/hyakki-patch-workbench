@@ -652,6 +652,7 @@ async function openFrame(index) {
   });
   canvas.width = state.image.naturalWidth;
   canvas.height = state.image.naturalHeight;
+  canvas.parentElement.style.setProperty('--canvas-aspect-ratio', `${canvas.width} / ${canvas.height}`);
   syncFramePageToIndex();
   renderFrameList();
   renderBoxList();
@@ -1134,6 +1135,42 @@ function stripAnsi(text) {
   return String(text || '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 }
 
+function normalizeTrainLog(text) {
+  return stripAnsi(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function renderTrainLog(text) {
+  const panel = $('trainLogPanel');
+  const log = $('trainLog');
+  const nextText = normalizeTrainLog(text);
+  const hasLog = Boolean(nextText);
+
+  panel.hidden = !hasLog;
+  if (!hasLog) {
+    log.textContent = '';
+    setTrainLogExpanded(false);
+    return;
+  }
+
+  if (log.textContent === nextText) return;
+  const wasEmpty = !log.textContent;
+  const wasFollowing = log.scrollHeight - log.scrollTop - log.clientHeight < 32;
+  const previousScrollTop = log.scrollTop;
+  log.textContent = nextText;
+  log.scrollTop = wasEmpty || wasFollowing ? log.scrollHeight : previousScrollTop;
+}
+
+function setTrainLogExpanded(expanded) {
+  const panel = $('trainLogPanel');
+  const button = $('trainLogExpandBtn');
+  if (!panel || !button) return;
+  const shouldExpand = Boolean(expanded && !panel.hidden);
+  panel.classList.toggle('expanded', shouldExpand);
+  document.body.classList.toggle('train-log-open', shouldExpand);
+  button.textContent = shouldExpand ? '收起' : '展开查看';
+  button.setAttribute('aria-expanded', String(shouldExpand));
+}
+
 function parseTrainProgress(logText) {
   const clean = stripAnsi(logText).replace(/\r/g, '\n');
   const lines = clean.split('\n').map(line => line.trim()).filter(Boolean);
@@ -1292,8 +1329,7 @@ function renderTrainStatus(data) {
   `;
   const trainDetails = $('trainSummary').querySelector('.train-details');
   if (trainDetails) trainDetails.open = false;
-  $('trainLog').textContent = logText;
-  $('trainLog').style.display = logText ? 'block' : 'none';
+  renderTrainLog(logText);
   $('installDepsBtn').disabled = job.running || install.running || env.ok || !env.exists;
   $('installCudaDepsBtn').disabled = job.running || install.running || !env.exists || !((env.gpu || {}).hardware || []).length || (env.gpu || {}).usable;
   $('trainStartBtn').disabled = job.running || install.running || !env.ok || selectedGpuWithoutCuda;
@@ -1653,6 +1689,15 @@ $('trainModeInput').onchange = () => {
 };
 $('trainStartBtn').onclick = () => busy($('trainStartBtn'), startTraining);
 $('trainStopBtn').onclick = () => busy($('trainStopBtn'), stopTraining);
+$('trainLogExpandBtn').onclick = () => {
+  setTrainLogExpanded(!$('trainLogPanel').classList.contains('expanded'));
+};
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('trainLogPanel').classList.contains('expanded')) {
+    setTrainLogExpanded(false);
+    $('trainLogExpandBtn').focus();
+  }
+});
 $('frameLabelFilter').onchange = () => {
   if ($('frameLabelFilter').value) {
     $('onlyUnlabeledInput').checked = false;
